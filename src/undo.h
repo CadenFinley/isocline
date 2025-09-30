@@ -1,5 +1,6 @@
 /* ----------------------------------------------------------------------------
   Copyright (c) 2021, Daan Leijen
+  Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
   under the terms of the MIT License. A copy of the license can be
   found in the "LICENSE" file at the root of this distribution.
@@ -16,9 +17,12 @@
 struct editstate_s;
 typedef struct editstate_s editstate_t;
 
-ic_private void editstate_init( editstate_t** es );
-ic_private void editstate_done( alloc_t* mem, editstate_t** es );
-ic_private void editstate_capture( alloc_t* mem, editstate_t** es, const char* input, ssize_t pos);
-ic_private bool editstate_restore( alloc_t* mem, editstate_t** es, const char** input, ssize_t* pos ); // caller needs to free input
+ic_private void editstate_init(editstate_t** es);
+ic_private void editstate_done(alloc_t* mem, editstate_t** es);
+ic_private void editstate_capture(alloc_t* mem, editstate_t** es,
+                                  const char* input, ssize_t pos);
+ic_private bool editstate_restore(alloc_t* mem, editstate_t** es,
+                                  const char** input,
+                                  ssize_t* pos);  // caller needs to free input
 
-#endif // IC_UNDO_H
+#endif  // IC_UNDO_H
