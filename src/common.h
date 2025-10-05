@@ -19,9 +19,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <sys/types.h>  // ssize_t
+#include <sys/types.h>
 
-#include "isocline/isocline.h"  // ic_malloc_fun_t, ic_color_t etc.
+#include "isocline.h"
 
 #ifdef __cplusplus
 #define ic_extern_c extern "C"
@@ -62,14 +62,12 @@ static inline ssize_t to_ssize_t(size_t sz) {
 ic_private void ic_memmove(void* dest, const void* src, ssize_t n);
 ic_private void ic_memcpy(void* dest, const void* src, ssize_t n);
 ic_private void ic_memset(void* dest, uint8_t value, ssize_t n);
-ic_private bool ic_memnmove(void* dest, ssize_t dest_size, const void* src,
-                            ssize_t n);
+ic_private bool ic_memnmove(void* dest, ssize_t dest_size, const void* src, ssize_t n);
 
 ic_private ssize_t ic_strlen(const char* s);
-ic_private bool ic_strcpy(char* dest, ssize_t dest_size /* including 0 */,
-                          const char* src);
-ic_private bool ic_strncpy(char* dest, ssize_t dest_size /* including 0 */,
-                           const char* src, ssize_t n);
+ic_private bool ic_strcpy(char* dest, ssize_t dest_size /* including 0 */, const char* src);
+ic_private bool ic_strncpy(char* dest, ssize_t dest_size /* including 0 */, const char* src,
+                           ssize_t n);
 
 ic_private bool ic_contains(const char* big, const char* s);
 ic_private bool ic_icontains(const char* big, const char* s);
@@ -100,10 +98,6 @@ ic_private unicode_t unicode_from_raw(uint8_t c);
 ic_private bool unicode_is_raw(unicode_t u, uint8_t* c);
 
 ic_private bool utf8_is_cont(uint8_t c);
-
-// Enhanced Unicode functions using utf8proc
-ic_private ssize_t unicode_char_width_utf8proc(const char* s, ssize_t len);
-ic_private bool unicode_is_combining_utf8proc(const char* s, ssize_t len);
 
 //-------------------------------------------------------------
 // Colors
@@ -190,7 +184,6 @@ ic_private char* mem_strndup(alloc_t* mem, const char* s, ssize_t n);
 #define mem_zalloc_tp(mem, tp) (tp*)mem_zalloc(mem, ssizeof(tp))
 #define mem_malloc_tp_n(mem, tp, n) (tp*)mem_malloc(mem, (n) * ssizeof(tp))
 #define mem_zalloc_tp_n(mem, tp, n) (tp*)mem_zalloc(mem, (n) * ssizeof(tp))
-#define mem_realloc_tp(mem, tp, p, n) \
-    (tp*)mem_realloc(mem, p, (n) * ssizeof(tp))
+#define mem_realloc_tp(mem, tp, p, n) (tp*)mem_realloc(mem, p, (n) * ssizeof(tp))
 
 #endif  // IC_COMMON_H

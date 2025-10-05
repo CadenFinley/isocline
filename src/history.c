@@ -5,17 +5,18 @@
   under the terms of the MIT License. A copy of the license can be
   found in the "LICENSE" file at the root of this distribution.
 -----------------------------------------------------------------------------*/
-#include "isocline/history.h"
+#include "history.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 
-#include "isocline/common.h"
-#include "isocline/isocline.h"
-#include "isocline/stringbuf.h"
+#include "common.h"
+#include "isocline.h"
+#include "stringbuf.h"
 
-#define IC_MAX_HISTORY (200)
+#define IC_DEFAULT_HISTORY (200)
+#define IC_ABSOLUTE_MAX_HISTORY (5000)
 
 struct history_s {
     ssize_t count;       // current number of entries in use
@@ -128,9 +129,8 @@ ic_private const char* history_get(const history_t* h, ssize_t n) {
     return h->elems[h->count - n - 1];
 }
 
-ic_private bool history_search(const history_t* h, ssize_t from /*including*/,
-                               const char* search, bool backward, ssize_t* hidx,
-                               ssize_t* hpos) {
+ic_private bool history_search(const history_t* h, ssize_t from /*including*/, const char* search,
+                               bool backward, ssize_t* hidx, ssize_t* hpos) {
     const char* p = NULL;
     ssize_t i;
     if (backward) {
@@ -155,10 +155,8 @@ ic_private bool history_search(const history_t* h, ssize_t from /*including*/,
     return true;
 }
 
-ic_private bool history_search_prefix(const history_t* h,
-                                      ssize_t from /*including*/,
-                                      const char* prefix, bool backward,
-                                      ssize_t* hidx) {
+ic_private bool history_search_prefix(const history_t* h, ssize_t from /*including*/,
+                                      const char* prefix, bool backward, ssize_t* hidx) {
     if (prefix == NULL || h == NULL)
         return false;
 
@@ -208,16 +206,17 @@ ic_private bool history_search_prefix(const history_t* h,
 //
 //-------------------------------------------------------------
 
-ic_private void history_load_from(history_t* h, const char* fname,
-                                  long max_entries) {
+ic_private void history_load_from(history_t* h, const char* fname, long max_entries) {
     history_clear(h);
     h->fname = mem_strdup(h->mem, fname);
     if (max_entries == 0) {
         assert(h->elems == NULL);
         return;
     }
-    if (max_entries < 0 || max_entries > IC_MAX_HISTORY)
-        max_entries = IC_MAX_HISTORY;
+    if (max_entries < 0)
+        max_entries = IC_DEFAULT_HISTORY;
+    else if (max_entries > IC_ABSOLUTE_MAX_HISTORY)
+        max_entries = IC_ABSOLUTE_MAX_HISTORY;
     h->elems = (const char**)mem_zalloc_tp_n(h->mem, char*, max_entries);
     if (h->elems == NULL)
         return;
@@ -248,8 +247,7 @@ static char to_xdigit(uint8_t c) {
 }
 
 static bool ic_isxdigit(int c) {
-    return ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ||
-            (c >= '0' && c <= '9'));
+    return ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || (c >= '0' && c <= '9'));
 }
 
 static bool history_read_entry(history_t* h, FILE* f, stringbuf_t* sbuf) {
