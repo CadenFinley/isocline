@@ -21,6 +21,11 @@ extern "C" {
 #include "keybindings.h"
 #include "keycodes.h"
 
+/// Token returned from ic_readline* when Ctrl+C is pressed with an empty buffer.
+#define IC_READLINE_TOKEN_CTRL_C "<CTRL+C>"
+/// Token returned from ic_readline* when Ctrl+D is pressed with an empty buffer (EOF).
+#define IC_READLINE_TOKEN_CTRL_D "<CTRL+D>"
+
 /*! \mainpage
 Isocline C API reference.
 
@@ -57,7 +62,9 @@ Contents:
 ///   ("> ").
 /// @returns the heap allocated input on succes, which should be `free`d by the
 /// caller.
-///   Returns NULL on error, or if the user typed ctrl+d or ctrl+c.
+///   Returns NULL on error. When the user presses ctrl+d or ctrl+c on an empty
+///   buffer the functions return the tokens `IC_READLINE_TOKEN_CTRL_D` and
+///   `IC_READLINE_TOKEN_CTRL_C` respectively so callers can react accordingly.
 ///
 /// If the standard input (`stdin`) has no editing capability
 /// (like a dumb terminal (e.g. `TERM`=`dumb`), running in a debuggen, a pipe or
@@ -79,7 +86,9 @@ char* ic_readline(const char* prompt_text, const char* initial_input);
 ///   it will be overridden.
 /// @returns the heap allocated input on success, which should be `free`d by the
 /// caller.
-///   Returns NULL on error, or if the user typed ctrl+d or ctrl+c.
+///   Returns NULL on error. When the user presses ctrl+d or ctrl+c on an empty
+///   buffer the functions return the tokens `IC_READLINE_TOKEN_CTRL_D` and
+///   `IC_READLINE_TOKEN_CTRL_C` respectively so callers can react accordingly.
 ///
 /// @see ic_readline(), ic_set_prompt_marker(), ic_style_def()
 char* ic_readline_inline(const char* prompt_text, const char* inline_right_text,
@@ -444,10 +453,9 @@ bool ic_enable_inline_help(bool enable);
 /// \p extra_lines parameter specifies how many additional terminal lines
 /// beyond the prompt should be cleared while rewriting (defaults to 0).
 /// Returns the previous setting.
-bool ic_enable_prompt_cleanup(bool enable,
-                              size_t extra_lines
+bool ic_enable_prompt_cleanup(bool enable, size_t extra_lines
 #ifdef __cplusplus
-                              = 0
+                                           = 0
 #endif
 );
 
@@ -459,6 +467,12 @@ bool ic_enable_prompt_cleanup_empty_line(bool enable);
 /// Shows a hint inline when there is a single possible completion.
 /// @returns the previous setting.
 bool ic_enable_hint(bool enable);
+
+/// Disable or enable spell correction in completion (disabled by default).
+/// When enabled and no completion matches, tab will try to correct the
+/// current token to the closest available completion.
+/// @returns the previous setting.
+bool ic_enable_spell_correct(bool enable);
 
 /// Set millisecond delay before a hint is displayed. Can be zero. (500ms by
 /// default).
@@ -498,19 +512,79 @@ void ic_set_insertion_braces(const char* brace_pairs);
 /// Manage interactive key bindings.
 /// \{
 
+/// Bind a key to an action.
+/// @param key The key code to bind.
+/// @param action The action to perform when the key is pressed.
+/// @returns `true` if the binding was successful, `false` otherwise.
 bool ic_bind_key(ic_keycode_t key, ic_key_action_t action);
+
+/// Clear a key binding.
+/// @param key The key code whose binding should be removed.
+/// @returns `true` if the binding was cleared, `false` if no binding existed.
 bool ic_clear_key_binding(ic_keycode_t key);
+
+/// Reset all key bindings to their default values.
 void ic_reset_key_bindings(void);
+
+/// Get the action bound to a specific key.
+/// @param key The key code to query.
+/// @param out_action Pointer to receive the action bound to the key.
+/// @returns `true` if a binding exists, `false` otherwise.
 bool ic_get_key_binding(ic_keycode_t key, ic_key_action_t* out_action);
+
+/// List all current key bindings.
+/// @param buffer Buffer to receive the key binding entries.
+/// @param capacity Maximum number of entries the buffer can hold.
+/// @returns The number of entries written to the buffer.
 size_t ic_list_key_bindings(ic_key_binding_entry_t* buffer, size_t capacity);
+
+/// Get a key action from its name.
+/// @param name The name of the action.
+/// @returns The corresponding key action, or a default value if not found.
 ic_key_action_t ic_key_action_from_name(const char* name);
+
+/// Get the name of a key action.
+/// @param action The key action.
+/// @returns The name of the action, or NULL if invalid.
 const char* ic_key_action_name(ic_key_action_t action);
+
+/// Parse a key specification string into a keycode.
+/// @param spec The key specification string (e.g., "ctrl-c", "alt-x").
+/// @param out_key Pointer to receive the parsed keycode.
+/// @returns `true` if parsing was successful, `false` otherwise.
 bool ic_parse_key_spec(const char* spec, ic_keycode_t* out_key);
+
+/// Bind a key to an action using string names.
+/// @param key_spec The key specification string (e.g., "ctrl-c").
+/// @param action_name The name of the action to bind.
+/// @returns `true` if the binding was successful, `false` otherwise.
 bool ic_bind_key_named(const char* key_spec, const char* action_name);
+
+/// Format a keycode into a human-readable specification string.
+/// @param key The keycode to format.
+/// @param buffer Buffer to receive the formatted string.
+/// @param buflen Length of the buffer.
+/// @returns `true` if formatting was successful, `false` if the buffer was too small.
 bool ic_format_key_spec(ic_keycode_t key, char* buffer, size_t buflen);
+
+/// Set the active key binding profile.
+/// @param name The name of the profile to activate (e.g., "emacs", "vi").
+/// @returns `true` if the profile was set successfully, `false` otherwise.
 bool ic_set_key_binding_profile(const char* name);
+
+/// Get the name of the current key binding profile.
+/// @returns The name of the active profile.
 const char* ic_get_key_binding_profile(void);
+
+/// List all available key binding profiles.
+/// @param buffer Buffer to receive the profile information.
+/// @param capacity Maximum number of profiles the buffer can hold.
+/// @returns The number of profiles written to the buffer.
 size_t ic_list_key_binding_profiles(ic_key_binding_profile_info_t* buffer, size_t capacity);
+
+/// Get the default key specification strings for a given action.
+/// @param action The key action to query.
+/// @returns A string containing the default key specs, or NULL if none exist.
 const char* ic_key_binding_profile_default_specs(ic_key_action_t action);
 
 /// \}
@@ -681,9 +755,6 @@ void ic_term_writeln(const char* s);
 /// instead of the primary one.
 void ic_print_prompt(const char* prompt_text, bool continuation_line);
 
-/// Write formatted text to the console (and process CSI escape sequences).
-void ic_term_writeln(const char* s);
-
 /// Write a formatted string to the console.
 /// (and process CSI escape sequences)
 void ic_term_writef(const char* fmt, ...);
@@ -764,8 +835,8 @@ typedef void(ic_free_fun_t)(void* p);
 
 /// Initialize with custom allocation functions.
 /// This must be called as the first function in a program!
-void ic_init_custom_alloc(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _realloc,
-                          ic_free_fun_t* _free);
+void ic_init_custom_alloc(ic_malloc_fun_t* custom_malloc, ic_realloc_fun_t* custom_realloc,
+                          ic_free_fun_t* custom_free);
 
 /// Free a potentially custom alloc'd pointer (in particular, the result
 /// returned from `ic_readline`)

@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>  // getenv
 #include <string.h>
+#include <sys/types.h>
 
 #include "common.h"
 #include "stringbuf.h"  // str_next_ofs
