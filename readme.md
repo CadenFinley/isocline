@@ -1,3 +1,5 @@
+**ALERT** THIS WILL NOT COMPILE OUTSIDE OF CJSH IT REQUIRES CJSH's UNICODE HANDLERS
+
 <!-- <img align="right" width="350px" src="doc/completion-macos.png"/> -->
 
 <img align="left" src="doc/isocline-inline.svg"/>
