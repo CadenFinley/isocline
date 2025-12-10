@@ -148,6 +148,7 @@ target_compile_options(isocline PRIVATE ${ic_cflags})
 target_compile_definitions(isocline PRIVATE ${ic_cdefs})
 target_include_directories(isocline PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:${ic_install_dir}/include>
 )
 

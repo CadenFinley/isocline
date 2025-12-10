@@ -53,7 +53,7 @@ int main()
 
   // run until empty input
   char* input;
-  while((input = ic_readline("isoclinε")) != NULL)    // ctrl-d returns NULL (as well as errors)
+  while((input = ic_readline("isoclinε", NULL, NULL)) != NULL)    // ctrl-d returns NULL (as well as errors)
   {
     bool stop = (strcmp(input,"exit") == 0 || strcmp(input,"") == 0); 
     ic_printf("[gray]-----[/]\n"           // echo the input
