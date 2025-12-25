@@ -1,170 +1,73 @@
-<!-- <img align="right" width="350px" src="doc/completion-macos.png"/> -->
+# Isocline: a portable readline alternative
 
-<img align="left" src="doc/isocline-inline.svg"/>
+Isocline is a pure C line-editing and terminal-formatting library that you can drop into CLI programs as a modern replacement for [GNU readline]. It speaks a minimal subset of ANSI escape sequences, works out of the box on Linux, macOS, and Windows, and keeps dependencies at zero so you can vendor it anywhere.
 
-# Isocline: a portable readline alternative.
- 
-Isocline is a pure C library that can be used as an alternative to the GNU readline library (latest release v1.0.9, 2022-01-15).
+Originally authored by Daan Leijen for the [Koka] compiler, this fork keeps the MIT license while modernizing the internals for contemporary shells, REPLs, and scripting hosts.
 
-- Small: less than 8k lines and can be compiled as a single C file without 
-  any dependencies or configuration (e.g. `gcc -c src/isocline.c`).
-  
-- Portable: works on Unix, Windows, and macOS, and uses a minimal
-  subset of ANSI escape sequences.
-    
-- Features: extensive multi-line editing mode (`shift-tab`), (24-bit) color, history, completion, unicode, 
-  undo/redo, incremental history search, inline hints, syntax highlighting, brace matching,
-  closing brace insertion, auto indentation, graceful fallback, support for custom allocators, etc.
-  
-- License: MIT. 
+> **2025 rewrite.** Caden Finley rewrote the majority of Isocline for CJ's Shell, expanding the codebase to roughly 15k lines of production C while keeping the public API stable. Expect faster redraws, richer completion hooks, better diagnostics, and more color/TUI helpers than the 2022 v1.0.9 release.
 
-- Comes with a Haskell binding ([`System.Console.Isocline`][hdoc].
+## Highlights
 
-Enjoy,
-  Daan
-  
-<!--  <img align="right" width="350px" src="doc/history-win.png"/> -->
-  
-# Demo
+- **Feature-rich line editing:** multi-line mode (`Shift+Tab`), undo/redo, brace matching, inline hints, syntax highlighting, completion menus, and incremental history search are built in.
+- **Battle-tested portability:** runs on Unix, Windows Console, and Windows Terminal via either ANSI sequences or the console API, with graceful fallbacks on "dumb" terminals and custom allocator hooks.
+- **Single translation unit friendly:** the entire ~15k LOC library can still be compiled via the amalgamated `src/isocline.c`, or as separate objects by defining `IC_SEPARATE_OBJS`.
+- **High fidelity colors & formatting:** `ic_print*` exposes [bbcode]-style markup with 24-bit color, ANSI palette fallback, style definitions, and automatic tag balancing inspired by [Rich].
+- **Language-friendly:** stays pure ISO C so it links cleanly from C and C++ (bindings for other languages are welcome).
 
-![recording](doc/record-macos.svg)  
+## Project Snapshot
 
-Shows in order: unicode, syntax highlighting, brace matching, jump to matching brace, auto indent, multiline editing, 24-bit colors, inline hinting, filename completion, and incremental history search.  
-<sub>(screen capture was made with [termtosvg] by Nicolas Bedos)</sub>
+- **Language:** ISO C99 (GNU extensions guarded), no C++ runtime required.
+- **Size:** ~15k lines across 20+ translation units or one amalgamated file.
+- **Platforms:** Linux, macOS, Windows (legacy console & Windows Terminal).
+- **License:** MIT.
+- **Bindings:** C and C++ ready; additional community bindings encouraged.
+- **Use cases:** REPLs, language shells, build/test consoles, and diagnostics tools that need readline-class UX.
 
-# Usage
+## Demo
 
-Include the isocline header in your C or C++ source:
-```C
-#include <include/isocline.h>
+A showcase terminal session runs through unicode input, syntax highlighting, brace matching, jump-to-match, auto indent, multi-line editing, 24-bit colors, inline hinting, filename completion, and incremental history search (previous captures were produced with [termtosvg]). A refreshed recording will land in this repository once the new UI stabilizes.
+
+## Quick Start
+
+Include the public header:
+
+```c
+#include "include/isocline.h"
 ```
 
-and call `ic_readline` to get user input with rich editing abilities:
-```C
+and call `ic_readline` to obtain user input with rich editing:
+
+```c
 char* input;
-while( (input = ic_readline("prompt")) != NULL ) { // ctrl+d/c or errors return NULL
-  printf("you typed:\n%s\n", input); // use the input
-  free(input);  
+while ((input = ic_readline("prompt> ")) != NULL) {  // ctrl+d/c return tokens
+  printf("you typed:\n%s\n", input);
+  free(input);
 }
 ```
 
-See the [example] for a full example with completion, syntax highligting, history, etc.
+See the full [example] for completions, history, hints, syntax highlighting, and custom allocators.
 
-# Run the Example
+### Run the bundled example
 
-You can compile and run the [example] as:
 ```
 $ gcc -o example -Iinclude test/example.c src/isocline.c
 $ ./example
 ```
 
-or, the Haskell [example][HaskellExample]:
+## Build Options
+
+### Vendoring or single translation unit
+
+Copy `include/` and `src/` into your project or add Isocline as a [submodule]. Compile the amalgamated file directly (no configuration needed):
+
 ```
-$ ghc -ihaskell test/Example.hs src/isocline.c
-$ ./test/Example
-```
-
-
-# Editing with Isocline
-
-Isocline tries to be as compatible as possible with standard [GNU Readline] key bindings.
-
-### Overview:
-```apl
-       home/ctrl-a       cursor     end/ctrl-e
-         ┌─────────────────┼───────────────┐    (navigate)
-         │     ctrl-left   │  ctrl-right   │
-         │         ┌───────┼──────┐        │    ctrl-r   : search history
-         ▼         ▼       ▼      ▼        ▼    tab      : complete word
-  prompt> it is the quintessential language     shift-tab: insert new line
-         ▲         ▲              ▲        ▲    esc      : delete input, done
-         │         └──────────────┘        │    ctrl-z   : undo
-         │    alt-backsp        alt-d      │
-         └─────────────────────────────────┘    (delete)
-       ctrl-u                          ctrl-k
+$ gcc -c -std=c99 -Iinclude src/isocline.c
 ```
 
-<sub>Note: on macOS, the meta (alt) key is not directly available in most terminals. 
-Terminal/iTerm2 users can activate the meta key through
-`Terminal` &rarr; `Preferences` &rarr; `Settings` &rarr; `Use option as meta key`.</sub>
-
-### Key Bindings
-
-These are also shown when pressing `F1` on a Isocline prompt. We use `^` as a shorthand for `ctrl-`:
-
-| Navigation        |                                                 |
-|-------------------|-------------------------------------------------|
-| `left`,`^b`       | go one character to the left |
-| `right`,`^f   `   | go one character to the right |
-| `up           `   | go one row up, or back in the history |
-| `down         `   | go one row down, or forward in the history |
-| `^left        `   | go to the start of the previous word |
-| `^right       `   | go to the end the current word |
-| `home`,`^a    `   | go to the start of the current line |
-| `end`,`^e     `   | go to the end of the current line |
-| `pgup`,`^home `   | go to the start of the current input |
-| `pgdn`,`^end  `   | go to the end of the current input |
-| `alt-m        `   | jump to matching brace |
-| `^p           `   | go back in the history |
-| `^n           `   | go forward in the history |
-| `^r`,`^s      `   | search the history starting with the current word |
-  
-
-| Deletion        |                                                 |
-|-------------------|-------------------------------------------------|
-| `del`,`^d     `   | delete the current character |
-| `backsp`,`^h  `   | delete the previous character |
-| `^w           `   | delete to preceding white space |
-| `alt-backsp   `   | delete to the start of the current word |
-| `alt-d        `   | delete to the end of the current word |
-| `^u           `   | delete to the start of the current line |
-| `^k           `   | delete to the end of the current line |
-| `esc          `   | delete the current input, or done with empty input |
-  
-
-| Editing           |                                                 |
-|-------------------|-------------------------------------------------|
-| `enter        `   | accept current input |
-| `^enter`,`^j`,`shift-tab` | create a new line for multi-line input |
-| `^l           `   | clear screen |
-| `^t           `   | swap with previous character (move character backward) |
-| `^z`,`^_      `   | undo |
-| `^y           `   | redo |
-| `tab          `   | try to complete the current input |
-  
-
-| Completion menu   |                                                 |
-|-------------------|-------------------------------------------------|
-| `enter`,`left`    | use the currently selected completion |
-| `1` - `9`         | use completion N from the menu |
-| `tab, down    `   | select the next completion |
-| `shift-tab, up`   | select the previous completion |
-| `esc          `   | exit menu without completing |
-| `pgdn`,`^enter`,`^j`   | show all further possible completions |
-  
-
-| Incremental history search        |                                                 |
-|-------------------|-------------------------------------------------|
-| `enter        `   | use the currently found history entry |
-| `backsp`,`^z  `   | go back to the previous match (undo) |
-| `tab`,`^r`,`up`   | find the next match |
-| `shift-tab`,`^s`,`down`  | find an earlier match |
-| `esc          `   | exit search |
-
-
-# Build the Library
-
-### Build as a Single Source
-
-Copy the sources (in `include` and `src`) into your project, or add the library as a [submodule]:
-```
-$ git submodule add https://github.com/daanx/isocline
-```
-and add `isocline/src/isocline.c` to your build rules -- no configuration is needed. 
+Define `IC_SEPARATE_OBJS` if you prefer building each translation unit separately.
 
 ### Build with CMake
 
-Clone the repository and run cmake to build a static library (`.a`/`.lib`):
 ```
 $ git clone https://github.com/daanx/isocline
 $ cd isocline
@@ -172,190 +75,122 @@ $ mkdir -p build/release
 $ cd build/release
 $ cmake ../..
 $ cmake --build .
-```
-This builds a static library `libisocline.a` (or `isocline.lib` on Windows)
-and the example program:
-```
 $ ./example
 ```
 
-### Build the Haskell Library
+This produces `libisocline.a`/`isocline.lib` alongside the sample binary.
 
-See the Haskell [readme][Haskell] for instructions to build and use the Haskell library.
+## Editing Experience
 
+Isocline mirrors familiar [GNU readline] key bindings while adding multi-line editing, brace tools, inline hints, syntax highlighting, and advanced completion menus. Press `F1` during a prompt to display the built-in cheat sheet.
 
-# API Reference
+### Key bindings at a glance
 
-* See the [C API reference][docapi] and the [example] for example usage of history, completion, etc.
+| Navigation | Action |
+|------------|--------|
+| `left`, `Ctrl+B` | Move one character left |
+| `right`, `Ctrl+F` | Move one character right |
+| `up` | Previous history entry or visual row up |
+| `down` | Next history entry or visual row down |
+| `Ctrl+Left` | Jump to start of previous word |
+| `Ctrl+Right` | Jump to end of current word |
+| `Home`, `Ctrl+A` | Start of the current line |
+| `End`, `Ctrl+E` | End of the current line |
+| `PgUp`, `Ctrl+Home` | Top of the current input |
+| `PgDn`, `Ctrl+End` | Bottom of the current input |
+| `Alt+M` | Jump to matching brace |
+| `Ctrl+P` / `Ctrl+N` | Back / forward in history |
+| `Ctrl+R` / `Ctrl+S` | Incremental history search |
 
-* See the [Haskell API reference][hdoc] on Hackage and the Haskell [example][HaskellExample].
+| Deletion | Action |
+|----------|--------|
+| `Del`, `Ctrl+D` | Delete the character under the cursor |
+| `Backspace`, `Ctrl+H` | Delete the character before the cursor |
+| `Ctrl+W` | Delete to preceding whitespace |
+| `Alt+Backspace` | Delete to the start of the word |
+| `Alt+D` | Delete to the end of the word |
+| `Ctrl+U` | Delete to the start of the line |
+| `Ctrl+K` | Delete to the end of the line |
+| `Esc` | Clear the current buffer / exit when empty |
 
+| Editing | Action |
+|---------|--------|
+| `Enter` | Accept input |
+| `Ctrl+Enter`, `Ctrl+J`, `Shift+Tab` | Insert a newline (multi-line mode) |
+| `Ctrl+L` | Clear the screen |
+| `Ctrl+T` | Swap with the previous character |
+| `Ctrl+Z`, `Ctrl+_` | Undo |
+| `Ctrl+Y` | Redo |
+| `Tab` | Trigger completion |
 
-# Motivation
+| Completion menu | Action |
+|-----------------|--------|
+| `Enter`, `Left` | Accept the highlighted completion |
+| `1`–`9` | Pick completion N directly |
+| `Tab`, `Down` | Next completion |
+| `Shift+Tab`, `Up` | Previous completion |
+| `PgDn`, `Ctrl+Enter`, `Ctrl+J` | Show all completions |
+| `Esc` | Exit the menu |
 
-Isocline was created for use in the [Koka] interactive compiler. 
-This required: pure C (no dependency on a C++ runtime or other libraries), 
-portable (across Linux, macOS, and Windows), unicode support, 
-a BSD-style license, and good functionality for completion and multi-line editing.
+| Incremental history search | Action |
+|----------------------------|--------|
+| `Enter` | Use the highlighted entry |
+| `Backspace`, `Ctrl+Z` | Step back (undo) |
+| `Tab`, `Ctrl+R`, `Up` | Next match |
+| `Shift+Tab`, `Ctrl+S`, `Down` | Previous match |
+| `Esc` | Exit search |
 
-Some other excellent libraries that we considered:
-[GNU readline],
-[editline](https://github.com/troglobit/editline),
-[linenoise](https://github.com/antirez/linenoise),
-[replxx](https://github.com/AmokHuginnsson/replxx), and 
-[Haskeline](https://github.com/judah/haskeline).
+> On macOS, enable "Use Option as Meta key" in Terminal/iTerm2 preferences to access `Alt+` bindings.
 
+## Completion, hints, and highlighting
 
-# Formatted Output
+The completion API accepts context objects so you can register multiple completers (filesystem, keywords, custom commands) and combine them dynamically. Inline hints, right-aligned prompts, and syntax highlighting hooks share the same tokenizer so completions stay in sync with what the user sees. Undo/redo, brace matching, and incremental search operate across multiple visual lines for complex REPL inputs. History persists across sessions with pluggable storage.
 
-Isocline also exposes functions for rich terminal output
-as `ic_print` (and `ic_println` and `ic_printf`). 
-Inspired by the (Python) [Rich][RichBBcode] library, 
-this supports a form of [bbcode]'s to format the output:
+## Structured terminal output
+
+Beyond `ic_readline`, Isocline exposes `ic_print`, `ic_println`, and `ic_printf` for rich terminal output. Inspired by [Rich] and [RichBBcode], you can style messages with nested [bbcode]-style tags:
+
 ```c
-ic_println( "[b]bold [red]and red[/red][/b]" );
-```
-Each print automatically closes any open tags that were
-not yet closed. Also, you can use a general close
-tag as `[/]` to close the innermost tag, so the
-following print is equivalent to the earlier one:
-```c
-ic_println( "[b]bold [red]and red[/]" );
-```
-There can be multiple styles in one tag
-(where the first name is used for the closing tag):
-```c
-ic_println( "[u #FFD700]underlined gold[/]" );
-```
-
-Sometimes, you need to display arbitrary messages
-that may contain sequences that you would not like
-to be interpreted as bbcode tags. One way to do
-this is the `[!`_tag_`]` which ignores formatting
-up to a close tag of the form `[/`_tag_`]`.
-```c
-ic_printf( "[red]red? [!pre]%s[/pre].\n", "[blue]not blue!" );
-```
-
-Predefined styles include `b` (bold),
-`u` (underline), `i` (italic), and `r` (reverse video), but
-you can (re)define any style yourself as:
-```c
-ic_style_def("warning", "crimson u");
-```
-
-and use them like any builtin style or property:
-```c
-ic_println( "[warning]this is a warning![/]" );
-```
-which is great for adding themes to your application.
-
-Each `ic_print` function always closes any unclosed tags automatically.
-To open a style persistently, use `ic_style_open` with a matching
-`ic_style_close` which scopes over any `ic_print` statements in between.
-```c
+ic_println("[b]bold [red]and red[/red][/b]");
+ic_println("[warning]this is a warning![/]");
 ic_style_open("warning");
 ic_println("[b]crimson underlined and bold[/]");
 ic_style_close();
 ```
 
-# Advanced
+Custom styles are trivial:
 
+```c
+ic_style_def("warning", "crimson u");
+ic_println("[warning]watch out![/]");
+```
 
-## BBCode Format
+The `[!tag]...[/tag]` syntax preserves literal text without interpreting markup.
 
-An open tag can have multiple white space separated
-entries that are
-either a _style name_, or a primitive _property_[`=`_value_].
+## Advanced Topics
 
-### Styles
+### BBCode format
 
-Isocline provides the following builtin styles as property shorthands:
-`b` (bold), `u` (underline), `i` (italic), `r` (reverse video),
-and some builtin styles for syntax highlighting:
-`keyword`, `control` (control-flow keywords), `string`,
-`comment`, `number`, `type`, `constant`.
+Open tags accept whitespace-separated entries that are either style names or primitive `property=value` pairs. Built-in styles include `b`, `u`, `i`, `r`, plus syntax-highlighting shorthands such as `keyword`, `string`, `comment`, `number`, `type`, `constant`, and UI styles like `ic-prompt`, `ic-info`, `ic-diminish`, `ic-emphasis`, `ic-hint`, `ic-error`, and `ic-bracematch`.
 
-Predefined styles used by Isocline itself are:
+Boolean properties (`bold`, `italic`, `underline`, `reverse`) default to `on`. Color properties accept HTML [color names][htmlcolors], ANSI [color names][ansicolors], hex codes (`#rrggbb` / `#rgb`), or entries from the ANSI 256 [palette][ansicolor256] via `ansi-color=`_idx_ / `ansi-bgcolor=`_idx_. Use `color=`, `bgcolor=`, `on color`, or the shorthand `color` token to set foreground/background.
 
-- `ic-prompt`: prompt style, e.g. `ic_style_def("ic-prompt", "yellow on blue")`.
-- `ic-info`: information (like the numbers in a completion menu).    
-- `ic-diminish`: dim text (used for example in history search).
-- `ic-emphasis`: emphasized text (also used in history search).
-- `ic-hint`: color of an inline hint.
-- `ic-error`: error color (like an unmatched brace).   
-- `ic-bracematch`: color of matching parenthesis.
+Width helpers:
 
-### Properties
+- `width=WIDTH[;align[;fill]]` pads text to at least `WIDTH` columns with alignment `left|center|right`.
+- `maxwidth=WIDTH[;align]` constrains text to at most `WIDTH`, inserting ellipses on the trimmed side.
 
-Boolean properties are by default `on`:
+### Environment variables
 
-- `bold` [`=`(`on`|`off`)]
-- `italic` [`=`(`on`|`off`)]
-- `underline` [`=`(`on`|`off`)]
-- `reverse` [`=`(`on`|`off`)]
+- `NO_COLOR`: disable colors entirely.
+- `CLICOLOR=1`: enable automatic filename coloring via `LSCOLORS` / `LS_COLORS`.
+- `COLORTERM=truecolor|256color|16color|8color|monochrome`: force a specific palette.
+- `TERM`: consulted on some platforms to detect capabilities.
 
-Color properties can be assigned a _color_:
+### Colors
 
-- `color=`_color_
-- `bgcolor=`_color_
-- _color_: equivalent to `color=`_color_.
-- `on` _color_: equivalent to `bgcolor=`_color_.
+Isocline detects 24-bit color support automatically and remaps to 256/16/8-color palettes when needed. Test your terminal with `test/test_colors.c`:
 
-A color value can be specified in many ways:
-
-- any standard HTML [color name][htmlcolors].
-- any of the 16 standard ANSI [color names][ansicolors] by prefixing `ansi-` 
-  (like `ansi-black` or `ansi-maroon`).   
-  The actual color value of these depend on the a terminal theme.
-- `#`_rrggbb_ or `#`_rgb_ for a specific 24-bit color.
-- `ansi-color=`_idx_ or `ansi-bgcolor=`_idx_, where _idx_ specifies an entry in the
-  standard ANSI 256 [color palette][ansicolor256] (between 0 and 255). 
-  Use _idx_ 256 for the ANSI default color.
-
-The `width` property makes the text at least _width_ long:
-
-- `width=`_width_ [`;`_align_ [`;`_fill_] ]
-
-where _width_ is the column with, _align_ is `left`, `center`, or `right`,
-and _fill_ the fill character (`' '`).
-
-The _maxwidth_ property makes text at most _width_ long; when the content
-it is wider, the left- or right side (depending on the alignment) 
-will have three dots (`...`) to visualize that content is cut off. 
-
-- `maxwidth=`_width_ [`;`_align_]
-
-
-## Environment Variables
-
-- `NO_COLOR`: if present no colors are displayed.
-- `CLICOLOR=1`: if set, the `LSCOLORS` or `LS_COLORS` environment variables are used to colorize
-  filename completions.
-- `COLORTERM=`(`truecolor`|`256color`|`16color`|`8color`|`monochrome`): enable a certain color palette, see the next section.
-- `TERM`: used on some systems to determine the color
-
-## Colors
-
-Isocline supports 24-bit colors and any RGB colors are automatically
-mapped to a reduced palette on older terminals if these do not
-support true color. Detection of full color support
-is not always possible to do automatically and you can
-set the `COLORTERM` environment variable expicitly to force Isocline to use
-a specific palette:
-- `COLORTERM=truecolor`: use 24-bit colors.  
-  <img width="500px" src="doc/color/ansi-truecolor.png"/>
-- `COLORTERM=256color`: use the ANSI 256 color palette.  
-  <img width="500px" src="doc/color/ansi-256color.png"/>
-- `COLORTERM=16color` : use the regular ANSI 16 color 
-   palette (8 normal and 8 bright colors).  
-   <img width="500px" src="doc/color/ansi-16color.png"/>
-- `COLORTERM=8color`: use bold for bright colors.
-- `COLORTERM=monochrome`: use no color.
-
-The above screenshots are made with the 
-[`test_colors.c`](https://github.com/daanx/isocline/blob/main/test/test_colors.c) program. You can test your own
-terminal as:
 ```
 $ gcc -o test_colors -Iinclude test/test_colors.c src/isocline.c
 $ ./test_colors
@@ -363,105 +198,73 @@ $ COLORTERM=truecolor ./test_colors
 $ COLORTERM=16color ./test_colors
 ```
 
-## ANSI Escape Sequences
+### ANSI escape sequences
 
-Isocline uses just few ANSI escape sequences that are widely
-supported:
-- `ESC[`_n_`A`, `ESC[`_n_`B`, `ESC[`_n_`C`, and `ESC[`_n_`D`,
-  for moving the cursor _n_ places up, down, right, and left.
-- `ESC[K` to clear the line from the cursor.
-- `ESC[`_n_`m` for colors, with _n_ one of: 0 (reset), 1,22 (bold), 3,23 (italic),
-   4,24 (underline), 7,27 (reverse), 30-37,40-47,90-97,100-107 (color),
-   and 39,49 (select default color).
-- `ESC[38;5;`_n_`m`, `ESC[48;5;`_n_`m`, `ESC[38;2;`_r_`;`_g_`;`_b_`m`, `ESC[48;2;`_r_`;`_g_`;`_b_`m`: 
-  on terminals that support it, select 
-  entry _n_ from the
-  256 color ANSI palette (used with `XTERM=xterm-256color` for example), or directly specify
-  any 24-bit _rgb_ color (used with `COLORTERM=truecolor`) for the foreground or background.
-    
-On Windows the above functionality is implemented using the Windows console API
-(except if running in the new Windows Terminal which supports these escape
-sequences natively).
+Only widely supported sequences are used:
 
-## Async and Threads
+- Cursor movement: `ESC[nA`, `ESC[nB`, `ESC[nC`, `ESC[nD`.
+- Clearing: `ESC[K`.
+- Colors: `ESC[nm` (0 reset, 1/22 bold, 3/23 italic, 4/24 underline, 7/27 reverse, 30–37/40–47/90–97/100–107 colors, 39/49 default).
+- Extended colors: `ESC[38;5;nm`, `ESC[48;5;nm`, `ESC[38;2;r;g;bm`, `ESC[48;2;r;g;bm`.
 
-Isocline is _not_ thread-safe and `ic_readline`_xxx_ and `ic_print`_xxx_ should
-be used from one thread only.
+Windows builds use the Console API when ANSI sequences are unavailable.
 
-The best way to use `ic_readline` asynchronously is
-to run it in a (blocking) dedicated thread and deliver
-results from there to the async event loop. Isocline has the
-```C
-bool ic_async_stop(void)
+### Async and threads
+
+Isocline is not thread-safe; call `ic_readline*` and `ic_print*` from a single thread. To integrate with async loops, run `ic_readline` inside a dedicated blocking thread and relay results. Use:
+
+```c
+bool ic_async_stop(void);
 ```
-function that is thread-safe and can deliver an
-asynchronous event to Isocline that unblocks a current
-`ic_readline` and makes it behave as if the user pressed
-`ctrl-c` (which returns NULL from the read line call).
 
-## Color Mapping
+from other threads to interrupt an active `ic_readline`, simulating `Ctrl+C`.
 
-To map full RGB colors to an ANSI 256 or 16-color palette
-Isocline finds a palette color with the minimal "color distance" to
-the original color. There are various
-ways of calculating this: one way is to take the euclidean distance
-in the sRGB space (_simple-rgb_), a slightly better way is to 
-take a weighted distance where the weight distribution is adjusted
-according to how big the red component is ([redmean](https://en.wikipedia.org/wiki/Color_difference),
-denoted as _delta-rgb_ in the figure), 
-this is used by Isocline),
-and finally, we can first translate into a perceptually uniform color space
-(CIElab) and calculate the distance there using the [CIEDE2000](https://en.wikipedia.org/wiki/Color_difference)
-algorithm (_ciede2000_). Here are these three methods compared on
-some colors: 
+### Color mapping
 
-![color space comparison](doc/color/colorspace-map.png)
+When mapping RGB colors to ANSI palettes, Isocline minimizes perceptual color distance using a red-mean metric (with gray correction) instead of naive sRGB or CIEDE2000, striking a balance between accuracy and predictability:
 
-Each top row is the true 24-bit RGB color. Surprisingly,
-the sophisticated CIEDE2000 distance seems less good here compared to the 
-simpler methods (as in the upper left block for example)
-(perhaps  because this algorithm was created to find close
-perceptual colors in images where lightness differences may be given
-less weight?). CIEDE2000 also leads to more "outliers", for example as seen
-in column 5. Given these results, Isocline uses _redmean_ for
-color mapping. We also add a gray correction that makes it less
-likely to substitute a color for a gray value (and the other way
-around).
+(Older documentation contained a color-space comparison chart; updated captures will ship with the refreshed documentation.)
 
+The top row in that chart displayed the target 24-bit color; lower rows showed the approximations across multiple strategies.
 
-## Possible Future Extensions
+## API Reference
 
-- Vi key bindings.
-- kill buffer.
-- make the `ic_print`_xxx_ functions thread-safe.
-- extended low-level terminal functions.
-- status and progress bars.
-- prompt variants: confirm, etc.
-- ...
+- Browse the generated [C API reference][docapi] and the local [example](test/example.c) for history, completion, highlighting, and printing patterns.
 
-Contact me if you are interested in doing any of these :-)
+## Motivation & Related Work
 
+Isocline was created for the [Koka] interactive compiler: requirements included pure C, zero external dependencies, portable unicode support, BSD/MIT licensing, and capable multi-line completion. Other excellent libraries include [GNU readline], [editline](https://github.com/troglobit/editline), [linenoise](https://github.com/antirez/linenoise), [replxx](https://github.com/AmokHuginnsson/replxx), and [Haskeline](https://github.com/judah/haskeline).
 
-# Releases
+## Roadmap
 
-* `2022-01-15`: v1.0.9: fix missing `ic_completion_arg` (issue #6), 
-   fix null ptr check in ic_print (issue #7), fix crash when using /dev/null as both input and output.
-* `2021-09-05`: v1.0.5: use our own wcwidth for consistency; 
-  thanks to Hans-Georg Breunig for helping with testing on NetBSD.
-* `2021-08-28`: v1.0.4: fix color query on Ubuntu/Gnome
-* `2021-08-27`: v1.0.3: fix duplicates in completions 
-* `2021-08-23`: v1.0.2: fix windows eol wrapping
-* `2021-08-21`: v1.0.1: fix line-buffering
-* `2021-08-20`: v1.0.0: initial release  
-  
+- Vi-style key bindings.
+- Shared kill/yank buffer across prompts.
+- Thread-safe `ic_print*`.
+- Extended low-level terminal helpers.
+- Status/progress bars and prompt variants (confirmations, choices, etc.).
 
+Reach out if you want to help with any of these items.
+
+## Releases
+
+- `2025`: trunk rewrite by Caden Finley — new completion pipeline, diagnostics, and ~15k LOC core (current `main`).
+- `2022-01-15`: v1.0.9 — fix missing `ic_completion_arg` (issue #6), null-pointer check in `ic_print` (issue #7), crash when `/dev/null` is both input and output.
+- `2021-09-05`: v1.0.5 — custom `wcwidth` for consistency; thanks to Hans-Georg Breunig for NetBSD testing.
+- `2021-08-28`: v1.0.4 — fix color query on Ubuntu/GNOME.
+- `2021-08-27`: v1.0.3 — fix duplicates in completions.
+- `2021-08-23`: v1.0.2 — fix Windows EOL wrapping.
+- `2021-08-21`: v1.0.1 — fix line buffering.
+- `2021-08-20`: v1.0.0 — initial release.
+
+## Credits
+
+- **Daan Leijen** — original author and design.
+- **Caden Finley** — 2025 rewrite/maintenance for CJ's Shell and community adopters.
 
 [GNU readline]: https://tiswww.case.edu/php/chet/readline/rltop.html
-[koka]: http://www.koka-lang.org
+[Koka]: http://www.koka-lang.org
 [submodule]: https://git-scm.com/book/en/v2/Git-Tools-Submodules
-[Haskell]: https://github.com/daanx/isocline/tree/main/haskell
-[HaskellExample]: https://github.com/daanx/isocline/blob/main/test/Example.hs
-[example]: https://github.com/daanx/isocline/blob/main/test/example.c
+[example]: test/example.c
 [termtosvg]: https://github.com/nbedos/termtosvg
 [Rich]: https://github.com/willmcgugan/rich
 [RichBBcode]: https://rich.readthedocs.io/en/latest/markup.html
@@ -470,4 +273,3 @@ Contact me if you are interested in doing any of these :-)
 [ansicolors]: https://en.wikipedia.org/wiki/Web_colors#Basic_colors
 [ansicolor256]: https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit
 [docapi]: https://daanx.github.io/isocline
-[hdoc]: https://hackage.haskell.org/package/isocline/docs/System-Console-Isocline.html
