@@ -1,273 +1,157 @@
-# Isocline: a portable readline alternative
+# Isocline (CJSH Fork)
 
-Isocline is a pure C line-editing and terminal-formatting library that you can drop into CLI programs as a modern replacement for [GNU readline]. It speaks a minimal subset of ANSI escape sequences, works out of the box on Linux, macOS, and Windows, and keeps dependencies at zero so you can vendor it anywhere.
+Isocline is a pure C line-editing and terminal-formatting library designed as a modern drop-in replacement for GNU readline. This fork keeps the upstream MIT license and zero-dependency ethos while expanding the feature surface for CJ's Shell (cjsh), language REPLs, and custom CLI hosts that want richer UX without pulling in external runtimes.
 
-Originally authored by Daan Leijen for the [Koka] compiler, this fork keeps the MIT license while modernizing the internals for contemporary shells, REPLs, and scripting hosts.
+The code lives in `src/isocline/` and is distributed together with `include/isocline.h` so it can be vendored directly or built as a static library.
 
-## Highlights
+## What changed compared to upstream?
 
-- **Feature-rich line editing:** multi-line mode (`Shift+Tab`), undo/redo, brace matching, inline hints, syntax highlighting, completion menus, and incremental history search are built in.
-- **Battle-tested portability:** runs on Unix, Windows Console, and Windows Terminal via either ANSI sequences or the console API, with graceful fallbacks on "dumb" terminals and custom allocator hooks.
-- **Single translation unit friendly:** the entire ~15k LOC library can still be compiled via the amalgamated `src/isocline.c`, or as separate objects by defining `IC_SEPARATE_OBJS`.
-- **High fidelity colors & formatting:** `ic_print*` exposes [bbcode]-style markup with 24-bit color, ANSI palette fallback, style definitions, and automatic tag balancing inspired by [Rich].
-- **Language-friendly:** stays pure ISO C so it links cleanly from C and C++ (bindings for other languages are welcome).
+- **Multiline editor upgrades** – Relative/absolute line numbers, prompt-gutter replacement, configurable preallocated rows (`ic_set_multiline_start_line_count`), current-line highlighting, and visible whitespace markers (`ic_enable_visible_whitespace`).
+- **Prompt cleanup pipeline** – `ic_enable_prompt_cleanup*` lets embedders rewrite or clear prompts after accepting a line, collapse multiline submissions, and add spacer rows for recording-friendly shells.
+- **Abbreviations & widgets** – Fish-style abbreviations (`ic_add_abbreviation`, `ic_remove_abbreviation`, `ic_clear_abbreviations`) expand inline without breaking undo history. `ic_read_heredoc`, buffer accessors, and widget helpers (`ic_set_buffer`, `ic_get_buffer`, `ic_push_key_event`, `ic_set_unhandled_key_handler`) unlock advanced key-driven workflows.
+- **Completion diagnostics** – Extended completion API supports previews, inline hints, help text, and source attribution (`ic_add_completion_ex_with_source`). Spell correction, auto-tab expansion, preview suppression, and menu pagination are all toggleable at runtime.
+- **Key binding profiles** – Emacs and Vi profiles ship side-by-side, backed by inspectable bindings (`ic_list_key_bindings`, `ic_set_key_binding_profile`, `ic_bind_key_named`).
+- **Structured output** – BBCode-inspired markup (`ic_print`, `ic_printf`, `ic_style_def`, custom palettes) now mirrors cjsh prompt styling, complete with named UI tokens such as `ic-hint`, `ic-error`, `ic-linenumbers`, and `ic-bracematch`.
+- **Portability polish** – Smarter terminal detection, better Windows VT compatibility, configurable escape-sequence delays, and improved ANSI/color fallbacks keep the library usable in "dumb" terminals, tmux/screen splits, and Windows Terminal.
+- **Async friendliness** – Typeahead buffers, status message callbacks (`ic_set_status_message_callback`), and cooperative interruption (`ic_async_stop`) make embedding in event loops straightforward.
 
-## Project Snapshot
+All of these additions are backward compatible: leave the new toggles untouched and the editor behaves like classic isocline.
 
-- **Language:** ISO C99 (GNU extensions guarded), no C++ runtime required.
-- **Size:** ~15k lines across 20+ translation units or one amalgamated file.
-- **Platforms:** Linux, macOS, Windows (legacy console & Windows Terminal).
-- **License:** MIT.
-- **Bindings:** C and C++ ready; additional community bindings encouraged.
-- **Use cases:** REPLs, language shells, build/test consoles, and diagnostics tools that need readline-class UX.
+## Quick start
 
-## Demo
-
-A showcase terminal session runs through unicode input, syntax highlighting, brace matching, jump-to-match, auto indent, multi-line editing, 24-bit colors, inline hinting, filename completion, and incremental history search (previous captures were produced with [termtosvg]). A refreshed recording will land in this repository once the new UI stabilizes.
-
-## Quick Start
-
-Include the public header:
+Add the header to your compilation units and call `ic_readline`:
 
 ```c
-#include "include/isocline.h"
-```
+#include "isocline.h"
 
-and call `ic_readline` to obtain user input with rich editing:
+static void configure_editor(void) {
+  ic_enable_multiline(true);
+  ic_enable_multiline_indent(true);
+  ic_enable_line_numbers(true);
+  ic_enable_current_line_number_highlight(true);
+  ic_enable_completion_preview(true);
+  ic_enable_hint(true);
+  ic_set_hint_delay(60);               // ms
+  ic_enable_visible_whitespace(false); // opt-in markers
+  ic_add_abbreviation("abbr", "abbreviate");
+}
 
-```c
-char* input;
-while ((input = ic_readline("prompt> ")) != NULL) {  // ctrl+d/c return tokens
-  printf("you typed:\n%s\n", input);
-  free(input);
+int main(void) {
+  configure_editor();
+
+  char* line = NULL;
+  while ((line = ic_readline("cjsh> ", NULL, NULL)) != NULL) {
+    if (strcmp(line, "exit") == 0) {
+      free(line);
+      break;
+    }
+    ic_println("[ic-info]you typed:[/]");
+    ic_println(line);
+    free(line);
+  }
+  return 0;
 }
 ```
 
-See the full [example] for completions, history, hints, syntax highlighting, and custom allocators.
+### Single translation unit build
 
-### Run the bundled example
+Compile the amalgamated source when vendoring:
 
-```
-$ gcc -o example -Iinclude test/example.c src/isocline.c
-$ ./example
-```
-
-## Build Options
-
-### Vendoring or single translation unit
-
-Copy `include/` and `src/` into your project or add Isocline as a [submodule]. Compile the amalgamated file directly (no configuration needed):
-
-```
-$ gcc -c -std=c99 -Iinclude src/isocline.c
+```bash
+gcc -std=c99 -Iinclude -c src/isocline.c
 ```
 
-Define `IC_SEPARATE_OBJS` if you prefer building each translation unit separately.
+Define `IC_SEPARATE_OBJS` to build translation units individually (recommended for faster incremental builds inside cjsh).
 
-### Build with CMake
+### CMake
 
-```
-$ git clone https://github.com/daanx/isocline
-$ cd isocline
-$ mkdir -p build/release
-$ cd build/release
-$ cmake ../..
-$ cmake --build .
-$ ./example
-```
+The CJSH root `CMakeLists.txt` already exposes the library. To build it standalone:
 
-This produces `libisocline.a`/`isocline.lib` alongside the sample binary.
-
-## Editing Experience
-
-Isocline mirrors familiar [GNU readline] key bindings while adding multi-line editing, brace tools, inline hints, syntax highlighting, and advanced completion menus. Press `F1` during a prompt to display the built-in cheat sheet.
-
-### Key bindings at a glance
-
-| Navigation | Action |
-|------------|--------|
-| `left`, `Ctrl+B` | Move one character left |
-| `right`, `Ctrl+F` | Move one character right |
-| `up` | Previous history entry or visual row up |
-| `down` | Next history entry or visual row down |
-| `Ctrl+Left` | Jump to start of previous word |
-| `Ctrl+Right` | Jump to end of current word |
-| `Home`, `Ctrl+A` | Start of the current line |
-| `End`, `Ctrl+E` | End of the current line |
-| `PgUp`, `Ctrl+Home` | Top of the current input |
-| `PgDn`, `Ctrl+End` | Bottom of the current input |
-| `Alt+M` | Jump to matching brace |
-| `Ctrl+P` / `Ctrl+N` | Back / forward in history |
-| `Ctrl+R` / `Ctrl+S` | Incremental history search |
-
-| Deletion | Action |
-|----------|--------|
-| `Del`, `Ctrl+D` | Delete the character under the cursor |
-| `Backspace`, `Ctrl+H` | Delete the character before the cursor |
-| `Ctrl+W` | Delete to preceding whitespace |
-| `Alt+Backspace` | Delete to the start of the word |
-| `Alt+D` | Delete to the end of the word |
-| `Ctrl+U` | Delete to the start of the line |
-| `Ctrl+K` | Delete to the end of the line |
-| `Esc` | Clear the current buffer / exit when empty |
-
-| Editing | Action |
-|---------|--------|
-| `Enter` | Accept input |
-| `Ctrl+Enter`, `Ctrl+J`, `Shift+Tab` | Insert a newline (multi-line mode) |
-| `Ctrl+L` | Clear the screen |
-| `Ctrl+T` | Swap with the previous character |
-| `Ctrl+Z`, `Ctrl+_` | Undo |
-| `Ctrl+Y` | Redo |
-| `Tab` | Trigger completion |
-
-| Completion menu | Action |
-|-----------------|--------|
-| `Enter`, `Left` | Accept the highlighted completion |
-| `1`–`9` | Pick completion N directly |
-| `Tab`, `Down` | Next completion |
-| `Shift+Tab`, `Up` | Previous completion |
-| `PgDn`, `Ctrl+Enter`, `Ctrl+J` | Show all completions |
-| `Esc` | Exit the menu |
-
-| Incremental history search | Action |
-|----------------------------|--------|
-| `Enter` | Use the highlighted entry |
-| `Backspace`, `Ctrl+Z` | Step back (undo) |
-| `Tab`, `Ctrl+R`, `Up` | Next match |
-| `Shift+Tab`, `Ctrl+S`, `Down` | Previous match |
-| `Esc` | Exit search |
-
-> On macOS, enable "Use Option as Meta key" in Terminal/iTerm2 preferences to access `Alt+` bindings.
-
-## Completion, hints, and highlighting
-
-The completion API accepts context objects so you can register multiple completers (filesystem, keywords, custom commands) and combine them dynamically. Inline hints, right-aligned prompts, and syntax highlighting hooks share the same tokenizer so completions stay in sync with what the user sees. Undo/redo, brace matching, and incremental search operate across multiple visual lines for complex REPL inputs. History persists across sessions with pluggable storage.
-
-## Structured terminal output
-
-Beyond `ic_readline`, Isocline exposes `ic_print`, `ic_println`, and `ic_printf` for rich terminal output. Inspired by [Rich] and [RichBBcode], you can style messages with nested [bbcode]-style tags:
-
-```c
-ic_println("[b]bold [red]and red[/red][/b]");
-ic_println("[warning]this is a warning![/]");
-ic_style_open("warning");
-ic_println("[b]crimson underlined and bold[/]");
-ic_style_close();
+```bash
+git clone https://github.com/CadenFinley/CJsShell
+cd CJsShell
+cmake -S . -B build/isocline -DISOCLINE_ONLY=ON   # optional helper preset
+cmake --build build/isocline -j$(nproc)
 ```
 
-Custom styles are trivial:
+The build outputs `libisocline.a` (or `.lib` on Windows) plus the sample program in `test/example.c`.
 
-```c
-ic_style_def("warning", "crimson u");
-ic_println("[warning]watch out![/]");
-```
+## Editor capabilities
 
-The `[!tag]...[/tag]` syntax preserves literal text without interpreting markup.
+### Multiline & navigation
+- Automatic continuation detection (quotes, braces, heredocs, trailing `\`).
+- Absolute or relative line numbers with current-line highlighting.
+- Line-number gutter can replace the final prompt line for banner-heavy PS1 setups.
+- Configurable preallocated rows so multi-line prompts can render headers before editing begins.
+- Optional visible whitespace markers and gutter styling via `ic_style_def`.
+- Jump-to-match (`Alt+M`), history browsing, undo/redo stack, and familiar GNU readline bindings.
 
-## Advanced Topics
+### Completion, hints, and history
+- Context objects allow layered completers (filesystem + keywords + domain-specific commands).
+- Completion menu highlights, source labels, numeric shortcuts, and preview pane toggles.
+- Inline hints respect hint delays and respond to right-arrow acceptance.
+- Spell correction and fuzzy matching improve typo handling; auto-tab grows unique prefixes automatically.
+- Persistent history tracks timestamps and exit codes, with incremental search and duplicate suppression.
 
-### BBCode format
+### Abbreviations, widgets, and automation
+- Register fish-style abbreviations at runtime; they expand when followed by whitespace or submission.
+- `ic_read_heredoc` reuses the full editor stack for heredoc bodies.
+- Widget helpers (`ic_set_buffer`, `ic_get_buffer`, `ic_get_cursor_pos`, `ic_request_submit`) power custom bindings exposed through cjsh's `cjsh-widget` builtin.
+- Typeahead APIs (`ic_push_key_event`, `ic_push_key_sequence`, `ic_push_raw_input`) queue keystrokes captured while external commands run, enabling seamless buffered input once the prompt reappears.
 
-Open tags accept whitespace-separated entries that are either style names or primitive `property=value` pairs. Built-in styles include `b`, `u`, `i`, `r`, plus syntax-highlighting shorthands such as `keyword`, `string`, `comment`, `number`, `type`, `constant`, and UI styles like `ic-prompt`, `ic-info`, `ic-diminish`, `ic-emphasis`, `ic-hint`, `ic-error`, and `ic-bracematch`.
+### Prompt cleanup & structured output
+- Prompt cleanup toggles make REPL transcripts tidy: delete previous prompts, insert spacer lines, or collapse multiline submissions before printing output.
+- BBCode markup works for prompts and general output: `[b]`, `[warning]`, `[color=#ff79c6]`, `width=`, `maxwidth=`, and named styles (`ic-info`, `ic-hint`, `ic-error`, etc.).
+- Custom style definitions let embedders keep markup semantic while swapping themes at runtime.
 
-Boolean properties (`bold`, `italic`, `underline`, `reverse`) default to `on`. Color properties accept HTML [color names][htmlcolors], ANSI [color names][ansicolors], hex codes (`#rrggbb` / `#rgb`), or entries from the ANSI 256 [palette][ansicolor256] via `ansi-color=`_idx_ / `ansi-bgcolor=`_idx_. Use `color=`, `bgcolor=`, `on color`, or the shorthand `color` token to set foreground/background.
+### Terminal & portability
+- Minimal ANSI subset for broad compatibility, with automated 24-bit, 256-color, or 16-color fallbacks.
+- Windows console support via either native Console APIs or virtual terminal sequences when available.
+- Configurable escape-sequence delays ensure lone `ESC` handling still works over slow SSH or serial links.
 
-Width helpers:
+## Configuration surface (selected APIs)
 
-- `width=WIDTH[;align[;fill]]` pads text to at least `WIDTH` columns with alignment `left|center|right`.
-- `maxwidth=WIDTH[;align]` constrains text to at most `WIDTH`, inserting ellipses on the trimmed side.
+| Function | Purpose |
+| --- | --- |
+| `ic_enable_multiline`, `ic_enable_multiline_indent` | Toggle multiline editing and smart indentation |
+| `ic_enable_line_numbers`, `ic_enable_relative_line_numbers` | Show absolute/relative gutters |
+| `ic_enable_line_numbers_with_continuation_prompt`, `ic_enable_line_number_prompt_replacement` | Keep gutters visible alongside PS2 or swap them with the final prompt line |
+| `ic_enable_current_line_number_highlight` | Style the active line number differently |
+| `ic_enable_visible_whitespace`, `ic_set_whitespace_marker` | Display custom whitespace markers |
+| `ic_enable_prompt_cleanup`, `ic_enable_prompt_cleanup_empty_line`, `ic_enable_prompt_cleanup_truncate_multiline` | Control how prompts are rewritten after submission |
+| `ic_enable_completion_preview`, `ic_enable_auto_tab`, `ic_enable_hint`, `ic_set_hint_delay`, `ic_enable_spell_correct` | Tune completions and inline hints |
+| `ic_set_default_completer`, `ic_add_completion*` | Register layered completers with display/help/source metadata |
+| `ic_set_default_highlighter`, `ic_highlight` | Provide syntax highlighting callbacks |
+| `ic_bind_key`, `ic_set_key_binding_profile`, `ic_list_key_binding_profiles` | Inspect or override keymaps |
+| `ic_add_abbreviation`, `ic_remove_abbreviation`, `ic_clear_abbreviations` | Manage fish-style abbreviations |
+| `ic_set_status_message_callback` | Surface transient status banners under the prompt |
+| `ic_async_stop` | Interrupt a running `ic_readline` from another thread |
 
-### Environment variables
+Consult `include/isocline.h` for the full API, including completion transformers, history helpers, and terminal utilities.
 
-- `NO_COLOR`: disable colors entirely.
-- `CLICOLOR=1`: enable automatic filename coloring via `LSCOLORS` / `LS_COLORS`.
-- `COLORTERM=truecolor|256color|16color|8color|monochrome`: force a specific palette.
-- `TERM`: consulted on some platforms to detect capabilities.
+## Documentation
 
-### Colors
+CJSH's docs double as reference material for this fork:
 
-Isocline detects 24-bit color support automatically and remaps to 256/16/8-color palettes when needed. Test your terminal with `test/test_colors.c`:
+- `docs/reference/editing.md` – exhaustive walkthrough of editing, hints, abbreviations, and key binding controls.
+- `docs/reference/completions.md` – authoring guide for completion sources and cache formats.
+- `docs/reference/non-posix-features.md` – high-level overview of interactive extras powered by isocline.
 
-```
-$ gcc -o test_colors -Iinclude test/test_colors.c src/isocline.c
-$ ./test_colors
-$ COLORTERM=truecolor ./test_colors
-$ COLORTERM=16color ./test_colors
-```
+## Release timeline
 
-### ANSI escape sequences
-
-Only widely supported sequences are used:
-
-- Cursor movement: `ESC[nA`, `ESC[nB`, `ESC[nC`, `ESC[nD`.
-- Clearing: `ESC[K`.
-- Colors: `ESC[nm` (0 reset, 1/22 bold, 3/23 italic, 4/24 underline, 7/27 reverse, 30–37/40–47/90–97/100–107 colors, 39/49 default).
-- Extended colors: `ESC[38;5;nm`, `ESC[48;5;nm`, `ESC[38;2;r;g;bm`, `ESC[48;2;r;g;bm`.
-
-Windows builds use the Console API when ANSI sequences are unavailable.
-
-### Async and threads
-
-Isocline is not thread-safe; call `ic_readline*` and `ic_print*` from a single thread. To integrate with async loops, run `ic_readline` inside a dedicated blocking thread and relay results. Use:
-
-```c
-bool ic_async_stop(void);
-```
-
-from other threads to interrupt an active `ic_readline`, simulating `Ctrl+C`.
-
-### Color mapping
-
-When mapping RGB colors to ANSI palettes, Isocline minimizes perceptual color distance using a red-mean metric (with gray correction) instead of naive sRGB or CIEDE2000, striking a balance between accuracy and predictability:
-
-(Older documentation contained a color-space comparison chart; updated captures will ship with the refreshed documentation.)
-
-The top row in that chart displayed the target 24-bit color; lower rows showed the approximations across multiple strategies.
-
-## API Reference
-
-- Browse the generated [C API reference][docapi] and the local [example](test/example.c) for history, completion, highlighting, and printing patterns.
-
-## Motivation & Related Work
-
-Isocline was created for the [Koka] interactive compiler: requirements included pure C, zero external dependencies, portable unicode support, BSD/MIT licensing, and capable multi-line completion. Other excellent libraries include [GNU readline], [editline](https://github.com/troglobit/editline), [linenoise](https://github.com/antirez/linenoise), [replxx](https://github.com/AmokHuginnsson/replxx), and [Haskeline](https://github.com/judah/haskeline).
-
-## Roadmap
-
-- Vi-style key bindings.
-- Shared kill/yank buffer across prompts.
-- Thread-safe `ic_print*`.
-- Extended low-level terminal helpers.
-- Status/progress bars and prompt variants (confirmations, choices, etc.).
-
-Reach out if you want to help with any of these items.
-
-## Releases
-
-- `2025`: trunk rewrite by Caden Finley — new completion pipeline, diagnostics, and ~15k LOC core (current `main`).
-- `2022-01-15`: v1.0.9 — fix missing `ic_completion_arg` (issue #6), null-pointer check in `ic_print` (issue #7), crash when `/dev/null` is both input and output.
-- `2021-09-05`: v1.0.5 — custom `wcwidth` for consistency; thanks to Hans-Georg Breunig for NetBSD testing.
-- `2021-08-28`: v1.0.4 — fix color query on Ubuntu/GNOME.
-- `2021-08-27`: v1.0.3 — fix duplicates in completions.
-- `2021-08-23`: v1.0.2 — fix Windows EOL wrapping.
-- `2021-08-21`: v1.0.1 — fix line buffering.
-- `2021-08-20`: v1.0.0 — initial release.
+- **2025 (current `main`)** – Extensive rewrite by Caden Finley for CJ's Shell: new completion pipeline, diagnostics, prompt cleanup, fish-style abbreviations, enhanced keymaps, and ~15k LOC refactor.
+- **2022-01-15 (v1.0.9)** – Upstream: completion arg fixes, `ic_print` safety, `/dev/null` crash guard.
+- **2021-09-05 (v1.0.5)** – Upstream: custom `wcwidth` for consistent Unicode widths.
+- **2021-08-28 (v1.0.4)** – Upstream: color query fixes on Ubuntu/GNOME.
+- **2021-08-27 (v1.0.3)** – Upstream: duplicate completions fix.
+- **2021-08-23 (v1.0.2)** – Upstream: Windows EOL wrapping fix.
+- **2021-08-21 (v1.0.1)** – Upstream: line buffering fix.
+- **2021-08-20 (v1.0.0)** – Initial public release by Daan Leijen.
 
 ## Credits
 
-- **Daan Leijen** — original author and design.
-- **Caden Finley** — 2025 rewrite/maintenance for CJ's Shell and community adopters.
+- **Daan Leijen** – Original author and design of isocline.
+- **Caden Finley** – Maintainer of the CJSH fork and 2025 rewrite.
+- **CJSH contributors** – Bug fixes, completion sources, and documentation.
 
-[GNU readline]: https://tiswww.case.edu/php/chet/readline/rltop.html
-[Koka]: http://www.koka-lang.org
-[submodule]: https://git-scm.com/book/en/v2/Git-Tools-Submodules
-[example]: test/example.c
-[termtosvg]: https://github.com/nbedos/termtosvg
-[Rich]: https://github.com/willmcgugan/rich
-[RichBBcode]: https://rich.readthedocs.io/en/latest/markup.html
-[bbcode]: https://en.wikipedia.org/wiki/BBCode
-[htmlcolors]: https://en.wikipedia.org/wiki/Web_colors#HTML_color_names
-[ansicolors]: https://en.wikipedia.org/wiki/Web_colors#Basic_colors
-[ansicolor256]: https://en.wikipedia.org/wiki/ANSI_escape_code#8-bit
-[docapi]: https://daanx.github.io/isocline
+Isocline remains MIT-licensed. Vendoring and contributions are welcome; submit pull requests through the CJ's Shell repository or open issues describing desired editor features.
