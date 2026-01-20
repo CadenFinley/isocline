@@ -2,8 +2,25 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 #include "tty.h"
 
@@ -318,6 +335,7 @@ static void tty_cpush(tty_t* tty, const char* s) {
     tty->cpush_count += len;
 }
 
+#if defined(_WIN32)
 static void tty_cpushf(tty_t* tty, const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -327,6 +345,7 @@ static void tty_cpushf(tty_t* tty, const char* fmt, ...) {
     tty_cpush(tty, buf);
     va_end(args);
 }
+#endif
 
 ic_private void tty_cpush_char(tty_t* tty, uint8_t c) {
     uint8_t buf[2];
@@ -339,6 +358,7 @@ ic_private void tty_cpush_char(tty_t* tty, uint8_t c) {
 // Push escape codes (used on Windows to insert keys)
 //-------------------------------------------------------------
 
+#if defined(_WIN32)
 static unsigned csi_mods(code_t mods) {
     unsigned m = 1;
     if (mods & KEY_MOD_SHIFT)
@@ -368,6 +388,7 @@ static void tty_cpush_csi_unicode(tty_t* tty, code_t mods, uint32_t unicode) {
         tty_cpushf(tty, "\x1B[%u;%uu", unicode, csi_mods(mods));
     }
 }
+#endif
 
 //-------------------------------------------------------------
 // Init

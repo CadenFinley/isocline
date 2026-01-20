@@ -1,9 +1,26 @@
 /* ----------------------------------------------------------------------------
-    Copyright (c) 2021, Daan Leijen
-    Largely Modified by Caden Finley 2025 for CJ's Shell
-    This is free software; you can redistribute it and/or modify it
-    under the terms of the MIT License. A copy of the license can be
-    found in the "LICENSE" file at the root of this distribution.
+  Copyright (c) 2021, Daan Leijen
+  Largely Modified by Caden Finley 2025 for CJ's Shell
+  This is free software; you can redistribute it and/or modify it
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 
 /* ----------------------------------------------------------------------------
@@ -225,6 +242,38 @@ ic_public bool ic_line_numbers_are_relative(void) {
     if (env == NULL)
         return false;
     return env->relative_line_numbers;
+}
+
+ic_public bool ic_enable_line_numbers_with_continuation_prompt(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->allow_line_numbers_with_continuation_prompt;
+    env->allow_line_numbers_with_continuation_prompt = enable;
+    return prev;
+}
+
+ic_public bool ic_line_numbers_with_continuation_prompt_are_enabled(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    return env->allow_line_numbers_with_continuation_prompt;
+}
+
+ic_public bool ic_enable_line_number_prompt_replacement(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->replace_prompt_line_with_line_number;
+    env->replace_prompt_line_with_line_number = enable;
+    return prev;
+}
+
+ic_public bool ic_line_number_prompt_replacement_is_enabled(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    return env->replace_prompt_line_with_line_number;
 }
 
 ic_public bool ic_enable_current_line_number_highlight(bool enable) {

@@ -2,14 +2,34 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 
 #include "unicode.h"
 
+#include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "common.h"
@@ -334,8 +354,10 @@ static ssize_t str_find_ws_word_end(const char* s, ssize_t len, ssize_t pos) {
 // invoke a function for each terminal row; returns total row count.
 static ssize_t str_for_each_row(const char* s, ssize_t len, ssize_t termw, ssize_t promptw,
                                 ssize_t cpromptw, row_fun_t* fun, const void* arg, void* res) {
-    if (s == NULL)
+    if (s == NULL) {
         s = "";
+        len = 0;
+    }
     ssize_t i;
     ssize_t rcount = 0;
     ssize_t rcol = 0;
@@ -665,6 +687,7 @@ ic_private ssize_t sbuf_append_vprintf(stringbuf_t* sb, const char* fmt, va_list
     va_list args0;
     va_copy(args0, args);
     ssize_t needed = vsnprintf(sb->buf + sb->count, to_size_t(avail), fmt, args0);
+    va_end(args0);
     if (needed > avail) {
         sb->buf[sb->count] = 0;
         if (!sbuf_ensure_extra(sb, needed))
@@ -884,7 +907,7 @@ ic_private char* sbuf_strdup_from_utf8(stringbuf_t* sbuf) {
     ssize_t len = sbuf_len(sbuf);
     if (sbuf == NULL || len <= 0)
         return NULL;
-    char* s = mem_zalloc_tp_n(sbuf->mem, char, len);
+    char* s = mem_zalloc_tp_n(sbuf->mem, char, len + 1);
     if (s == NULL)
         return NULL;
     ssize_t dest = 0;
@@ -946,21 +969,6 @@ ic_public long ic_next_char(const char* s, long pos) {
     return (long)(pos + ofs);
 }
 
-// parse a decimal (leave pi unchanged on error)
-ic_private bool ic_atoz(const char* s, ssize_t* pi) {
-    return (sscanf(s, "%zd", pi) == 1);
-}
-
-// parse two decimals separated by a semicolon
-ic_private bool ic_atoz2(const char* s, ssize_t* pi, ssize_t* pj) {
-    return (sscanf(s, "%zd;%zd", pi, pj) == 2);
-}
-
-// parse unsigned 32-bit (leave pu unchanged on error)
-ic_private bool ic_atou32(const char* s, uint32_t* pu) {
-    return (sscanf(s, "%" SCNu32, pu) == 1);
-}
-
 // Convenience: character class for whitespace `[ \t\r\n]`.
 ic_public bool ic_char_is_white(const char* s, long len) {
     if (s == NULL || len != 1)
@@ -972,6 +980,61 @@ ic_public bool ic_char_is_white(const char* s, long len) {
 // Convenience: character class for non-whitespace `[^ \t\r\n]`.
 ic_public bool ic_char_is_nonwhite(const char* s, long len) {
     return !ic_char_is_white(s, len);
+}
+
+static bool parse_ssize_internal(const char* s, ssize_t* out, char** parsed_end) {
+    if (s == NULL || out == NULL)
+        return false;
+    errno = 0;
+    char* local_end = NULL;
+    long long value = strtoll(s, &local_end, 10);
+    if (errno != 0 || local_end == s)
+        return false;
+#if defined(SSIZE_MAX) && defined(SSIZE_MIN)
+    if (value < (long long)SSIZE_MIN || value > (long long)SSIZE_MAX)
+        return false;
+#endif
+    *out = (ssize_t)value;
+    if (parsed_end != NULL)
+        *parsed_end = local_end;
+    return true;
+}
+
+static bool parse_ssize_strict(const char* s, ssize_t* out) {
+    char* endptr = NULL;
+    if (!parse_ssize_internal(s, out, &endptr))
+        return false;
+    return (endptr != NULL) ? (*endptr == '\0') : false;
+}
+
+// parse a decimal (leave pi unchanged on error)
+ic_private bool ic_atoz(const char* s, ssize_t* pi) {
+    return parse_ssize_strict(s, pi);
+}
+
+// parse two decimals separated by a semicolon
+ic_private bool ic_atoz2(const char* s, ssize_t* pi, ssize_t* pj) {
+    if (s == NULL || pi == NULL || pj == NULL)
+        return false;
+    char* endptr = NULL;
+    if (!parse_ssize_internal(s, pi, &endptr) || endptr == NULL)
+        return false;
+    if (*endptr != ';')
+        return false;
+    return parse_ssize_strict(endptr + 1, pj);
+}
+
+// parse unsigned 32-bit (leave pu unchanged on error)
+ic_private bool ic_atou32(const char* s, uint32_t* pu) {
+    if (s == NULL || pu == NULL)
+        return false;
+    errno = 0;
+    char* endptr = NULL;
+    unsigned long value = strtoul(s, &endptr, 10);
+    if (errno != 0 || endptr == s || *endptr != '\0' || value > UINT32_MAX)
+        return false;
+    *pu = (uint32_t)value;
+    return true;
 }
 
 // Convenience: character class for separators `[ \t\r\n,.;:/\\\(\)\{\}\[\]]`.

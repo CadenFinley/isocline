@@ -2,13 +2,29 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 
 //-------------------------------------------------------------
 
-static bool edit_try_spell_correct(ic_env_t* env, editor_t* eb);
 // Completion menu: this file is included in editline.c
 //-------------------------------------------------------------
 
@@ -43,6 +59,35 @@ ic_private void sbuf_append_tagged(stringbuf_t* sb, const char* tag, const char*
     sbuf_appendf(sb, "[%s]", tag);
     sbuf_append(sb, content);
     sbuf_append(sb, "[/]");
+}
+
+static const char* completion_single_line_view(alloc_t* mem, const char* display,
+                                               char** allocated) {
+    if (allocated != NULL) {
+        *allocated = NULL;
+    }
+    if (display == NULL) {
+        return "";
+    }
+    const char* newline = strchr(display, '\n');
+    if (newline == NULL) {
+        return display;
+    }
+    size_t prefix_len = (size_t)(newline - display);
+    size_t truncated_len = prefix_len + 3;  // account for "..."
+    char* truncated = mem_malloc_tp_n(mem, char, (ssize_t)(truncated_len + 1));
+    if (truncated == NULL) {
+        return display;
+    }
+    if (prefix_len > 0) {
+        memcpy(truncated, display, prefix_len);
+    }
+    memcpy(truncated + prefix_len, "...", 3);
+    truncated[truncated_len] = '\0';
+    if (allocated != NULL) {
+        *allocated = truncated;
+    }
+    return truncated;
 }
 
 static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, ssize_t width,
@@ -91,9 +136,15 @@ static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, s
     if (selected) {
         sbuf_append(eb->extra, "[ic-emphasis]");
     }
-    sbuf_append(eb->extra, display);
+    char* single_line_alloc = NULL;
+    const char* single_line_display =
+        completion_single_line_view(env->mem, display, &single_line_alloc);
+    sbuf_append(eb->extra, single_line_display);
     if (selected) {
         sbuf_append(eb->extra, "[/ic-emphasis]");
+    }
+    if (single_line_alloc != NULL) {
+        mem_free(env->mem, single_line_alloc);
     }
 
     // Add source information if available
@@ -143,8 +194,11 @@ static ssize_t edit_completions_max_width(ic_env_t* env, ssize_t count) {
     for (ssize_t i = 0; i < count; i++) {
         const char* help = NULL;
         const char* source = completions_get_source(env->completions, i);
-        ssize_t w =
-            bbcode_column_width(env->bbcode, completions_get_display(env->completions, i, &help));
+        const char* display = completions_get_display(env->completions, i, &help);
+        char* display_alloc = NULL;
+        const char* single_line_display =
+            completion_single_line_view(env->mem, display, &display_alloc);
+        ssize_t w = bbcode_column_width(env->bbcode, single_line_display);
 
         // Add space for source information if available
         if (source != NULL) {
@@ -157,6 +211,9 @@ static ssize_t edit_completions_max_width(ic_env_t* env, ssize_t count) {
         }
         if (w > max_width) {
             max_width = w;
+        }
+        if (display_alloc != NULL) {
+            mem_free(env->mem, display_alloc);
         }
     }
     return max_width;
@@ -352,7 +409,6 @@ again:
         }
 
         // force a single-column layout in expanded mode for readability
-        const ssize_t columns = 1;
         ssize_t total_rows = count_displayed;
         if (total_rows <= 0) {
             total_rows = 1;

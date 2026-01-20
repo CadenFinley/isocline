@@ -2,8 +2,25 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 #include <ctype.h>
 #include <limits.h>
@@ -14,9 +31,11 @@
 #include "common.h"
 #include "completions.h"
 #include "env.h"
+#include "env_internal.h"
 #include "highlight.h"
 #include "history.h"
 #include "isocline.h"
+#include "prompt_line_replacement.h"
 #include "stringbuf.h"
 #include "term.h"
 #include "tty.h"
@@ -40,28 +59,67 @@ typedef struct editor_s {
     ssize_t cur_row;              // current row that has the cursor (0 based, relative to
                                   // the prompt)
     ssize_t termw;
-    bool modified;                     // has a modification happened? (used for history navigation
-                                       // for example)
-    bool disable_undo;                 // temporarily disable auto undo (for history search)
-    bool refresh_suppressed;           // batch screen updates during high-volume input
-    bool refresh_pending;              // remember to refresh when suppression lifts
-    bool history_prefix_active;        // whether prefix-prioritized history is active
-    bool request_submit;               // request submission of current line
-    bool force_linear_line_numbers;    // final render should drop relative numbering styling
-    ssize_t history_idx;               // current index in the history
-    editstate_t* undo;                 // undo buffer
-    editstate_t* redo;                 // redo buffer
-    const char* prompt_text;           // text of the prompt before the prompt marker
-    ssize_t prompt_prefix_lines;       // number of prefix lines emitted for prompt
-    bool prompt_begins_with_newline;   // prompt started with a leading newline
-    const char* inline_right_text;     // inline right-aligned text on input line
-    ssize_t inline_right_width;        // cached width of inline right text
+    bool modified;                    // has a modification happened? (used for history navigation
+                                      // for example)
+    bool disable_undo;                // temporarily disable auto undo (for history search)
+    bool refresh_suppressed;          // batch screen updates during high-volume input
+    bool refresh_pending;             // remember to refresh when suppression lifts
+    bool history_prefix_active;       // whether prefix-prioritized history is active
+    bool request_submit;              // request submission of current line
+    bool force_linear_line_numbers;   // final render should drop relative numbering styling
+    ssize_t history_idx;              // current index in the history
+    editstate_t* undo;                // undo buffer
+    editstate_t* redo;                // redo buffer
+    const char* prompt_text;          // text of the prompt before the prompt marker
+    ssize_t prompt_prefix_lines;      // number of prefix lines emitted for prompt
+    bool prompt_begins_with_newline;  // prompt started with a leading newline
+    bool replace_prompt_line_with_number;  // should row 0 use line numbers instead of prompt text?
+    bool
+        force_prompt_text_visible;  // temporarily prevent prompt replacement (e.g., search prompts)
+    const char* inline_right_text;  // inline right-aligned text on input line
+    ssize_t inline_right_width;     // cached width of inline right text
     ssize_t line_number_column_width;  // cached total prefix width when line numbers are shown
     alloc_t* mem;                      // allocator
     // caches
     attrbuf_t* attrs;  // reuse attribute buffers
     attrbuf_t* attrs_extra;
 } editor_t;
+
+static ssize_t count_logical_lines(stringbuf_t* sbuf);
+
+static bool has_continuation_prompt_marker(const ic_env_t* env) {
+    return (env != NULL && env->cprompt_marker != NULL && env->cprompt_marker[0] != '\0');
+}
+
+static bool line_numbers_enabled(const ic_env_t* env) {
+    if (env == NULL || !env->show_line_numbers) {
+        return false;
+    }
+    if (has_continuation_prompt_marker(env) && !env->allow_line_numbers_with_continuation_prompt) {
+        return false;
+    }
+    return true;
+}
+
+static bool prompt_line_should_use_line_numbers(const ic_env_t* env, const editor_t* eb) {
+    if (env == NULL || eb == NULL) {
+        return false;
+    }
+
+    if (eb->force_prompt_text_visible) {
+        return false;
+    }
+
+    ic_prompt_line_replacement_state_t predicate = {
+        .replace_prompt_line_with_line_number = env->replace_prompt_line_with_line_number,
+        .prompt_has_prefix_lines = (eb->prompt_prefix_lines > 0),
+        .prompt_begins_with_newline = eb->prompt_begins_with_newline,
+        .line_numbers_enabled = line_numbers_enabled(env),
+        .input_has_content = (eb->input != NULL && sbuf_len(eb->input) > 0),
+    };
+
+    return ic_prompt_line_replacement_should_activate(&predicate);
+}
 
 static void edit_generate_completions(ic_env_t* env, editor_t* eb, bool autotab);
 static void edit_history_search_with_current_word(ic_env_t* env, editor_t* eb);
@@ -311,6 +369,7 @@ static bool editor_pos_is_at_end(editor_t* eb) {
 //-------------------------------------------------------------
 
 static ssize_t compute_continuation_indent_target(ic_env_t* env, editor_t* eb, ssize_t promptw) {
+    ic_unused(eb);
     ssize_t cmarkerw = bbcode_column_width(env->bbcode, env->cprompt_marker);
     if (env->no_multiline_indent) {
         return cmarkerw;
@@ -341,19 +400,24 @@ static void edit_get_prompt_width(ic_env_t* env, editor_t* eb, bool in_extra, ss
         // todo: cache prompt widths
         ssize_t textw = bbcode_column_width(env->bbcode, eb->prompt_text);
         ssize_t markerw = bbcode_column_width(env->bbcode, env->prompt_marker);
-        *promptw = markerw + textw;
+        ssize_t base_promptw = markerw + textw;
 
-        ssize_t indent_target = compute_continuation_indent_target(env, eb, *promptw);
-        if (env->show_line_numbers) {
+        ssize_t indent_target = compute_continuation_indent_target(env, eb, base_promptw);
+        ssize_t line_prefix_width = indent_target;
+        if (line_numbers_enabled(env)) {
             ssize_t cached_width =
                 (eb->line_number_column_width > 0 ? eb->line_number_column_width
                                                   : estimate_line_number_column_width(eb));
-            *cpromptw = (cached_width > indent_target ? cached_width : indent_target);
-        } else {
-            *cpromptw = indent_target;
+            if (cached_width > line_prefix_width) {
+                line_prefix_width = cached_width;
+            }
         }
 
+        *promptw = (eb->replace_prompt_line_with_number ? line_prefix_width : base_promptw);
+        *cpromptw = line_prefix_width;
+
         // Update cached inline right text width
+
         if (eb->inline_right_text != NULL) {
             eb->inline_right_width = bbcode_column_width(env->bbcode, eb->inline_right_text);
             // Try direct string length as backup
@@ -631,12 +695,17 @@ static void edit_write_prompt(ic_env_t* env, editor_t* eb, ssize_t row, bool in_
                               bool is_continuation_row) {
     if (in_extra)
         return;
+    const bool line_numbers_active = line_numbers_enabled(env);
+    const bool row_uses_prompt_text = (row == 0 && !eb->replace_prompt_line_with_number);
+    const bool row_uses_line_numbers =
+        (!in_extra && line_numbers_active && (row > 0 || eb->replace_prompt_line_with_number));
+
     bbcode_style_open(env->bbcode, "ic-prompt");
-    if (row == 0) {
+    if (row_uses_prompt_text) {
         // regular prompt text
         bbcode_print(env->bbcode, eb->prompt_text);
-    } else if (env->show_line_numbers) {
-        // show line numbers for multiline input
+    } else if (row_uses_line_numbers) {
+        // show line numbers for multiline input (row 0 or continuation rows)
         bbcode_style_close(env->bbcode, NULL);
 
         ssize_t textw = bbcode_column_width(env->bbcode, eb->prompt_text);
@@ -679,20 +748,29 @@ static void edit_write_prompt(ic_env_t* env, editor_t* eb, ssize_t row, bool in_
 
         bbcode_style_open(env->bbcode, "ic-prompt");
     } else if (!env->no_multiline_indent) {
-        // multiline continuation indentation
-        // todo: cache prompt widths
-        ssize_t textw = bbcode_column_width(env->bbcode, eb->prompt_text);
-        ssize_t markerw = bbcode_column_width(env->bbcode, env->prompt_marker);
-        ssize_t cmarkerw = bbcode_column_width(env->bbcode, env->cprompt_marker);
-        if (cmarkerw < markerw + textw) {
-            term_write_repeat(env->term, " ", markerw + textw - cmarkerw);
-        }
+        ic_emit_continuation_indent(env, eb->prompt_text);
     }
     // the marker (skip for line numbers since we include our own separator)
-    if (row == 0 || !env->show_line_numbers) {
+    if ((row == 0 && !eb->replace_prompt_line_with_number) || !line_numbers_active) {
         bbcode_print(env->bbcode, (row == 0 ? env->prompt_marker : env->cprompt_marker));
     }
     bbcode_style_close(env->bbcode, NULL);
+}
+
+static ssize_t edit_decode_codepoint(const char* text, ssize_t len, ssize_t offset,
+                                     unicode_t* code_out) {
+    if (text == NULL || len <= 0 || offset >= len)
+        return 0;
+    ssize_t char_len = 0;
+    unicode_t code = unicode_from_qutf8((const uint8_t*)text + offset, len - offset, &char_len);
+    if (char_len <= 0 || offset + char_len > len) {
+        char_len = 1;
+        code = (uint8_t)text[offset];
+    }
+    if (code_out != NULL) {
+        *code_out = code;
+    }
+    return char_len;
 }
 
 static void edit_write_row_text(ic_env_t* env, const char* text, ssize_t len, const attr_t* attrs,
@@ -730,13 +808,10 @@ static void edit_write_row_text(ic_env_t* env, const char* text, ssize_t len, co
         }
         ssize_t offset = 0;
         while (offset < len) {
-            ssize_t char_len = 0;
-            unicode_t code =
-                unicode_from_qutf8((const uint8_t*)text + offset, len - offset, &char_len);
-            if (char_len <= 0 || offset + char_len > len) {
-                char_len = 1;
-                code = (uint8_t)text[offset];
-            }
+            unicode_t code = 0;
+            ssize_t char_len = edit_decode_codepoint(text, len, offset, &code);
+            if (char_len <= 0)
+                break;
 
             if (code == ' ') {
                 if (has_whitespace_style && !whitespace_active) {
@@ -766,12 +841,10 @@ static void edit_write_row_text(ic_env_t* env, const char* text, ssize_t len, co
     attr_t whitespace_base_attr = attr_none();
     ssize_t offset = 0;
     while (offset < len) {
-        ssize_t char_len = 0;
-        unicode_t code = unicode_from_qutf8((const uint8_t*)text + offset, len - offset, &char_len);
-        if (char_len <= 0 || offset + char_len > len) {
-            char_len = 1;
-            code = (uint8_t)text[offset];
-        }
+        unicode_t code = 0;
+        ssize_t char_len = edit_decode_codepoint(text, len, offset, &code);
+        if (char_len <= 0)
+            break;
 
         attr_t attr = attrs[offset];
         attr_t base_attr = attr_update_with(default_attr, attr);
@@ -802,6 +875,30 @@ static void edit_write_row_text(ic_env_t* env, const char* text, ssize_t len, co
         offset += char_len;
     }
     term_set_attr(env->term, default_attr);
+}
+
+static stringbuf_t* edit_ensure_extra_buffer(editor_t* eb, stringbuf_t* extra) {
+    if (extra == NULL && eb != NULL) {
+        extra = sbuf_new(eb->mem);
+    }
+    return extra;
+}
+
+static stringbuf_t* edit_append_extra_block(ic_env_t* env, editor_t* eb, stringbuf_t* extra,
+                                            stringbuf_t* block) {
+    if (env == NULL || eb == NULL || block == NULL || sbuf_len(block) <= 0)
+        return extra;
+
+    extra = edit_ensure_extra_buffer(eb, extra);
+    if (extra == NULL)
+        return NULL;
+
+    if (sbuf_len(extra) > 0 && !sbuf_ends_with_newline(extra)) {
+        bbcode_append(env->bbcode, "\n", extra, eb->attrs_extra);
+    }
+
+    bbcode_append(env->bbcode, sbuf_string(block), extra, eb->attrs_extra);
+    return extra;
 }
 
 //-------------------------------------------------------------
@@ -1002,6 +1099,7 @@ static ssize_t logical_line_at_pos(stringbuf_t* sbuf, ssize_t pos) {
 }
 
 static void edit_refresh(ic_env_t* env, editor_t* eb) {
+    eb->replace_prompt_line_with_number = prompt_line_should_use_line_numbers(env, eb);
     // calculate the new cursor row and total rows needed
     ssize_t promptw, cpromptw;
     edit_get_prompt_width(env, eb, false, &promptw, &cpromptw);
@@ -1039,27 +1137,11 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
     }
 
     if (sbuf_len(eb->hint_help) > 0) {
-        if (extra == NULL) {
-            extra = sbuf_new(eb->mem);
-        }
-        if (extra != NULL) {
-            if (sbuf_len(extra) > 0 && !sbuf_ends_with_newline(extra)) {
-                bbcode_append(env->bbcode, "\n", extra, eb->attrs_extra);
-            }
-            bbcode_append(env->bbcode, sbuf_string(eb->hint_help), extra, eb->attrs_extra);
-        }
+        extra = edit_append_extra_block(env, eb, extra, eb->hint_help);
     }
 
     if (menu_active) {
-        if (extra == NULL) {
-            extra = sbuf_new(eb->mem);
-        }
-        if (extra != NULL) {
-            if (sbuf_len(extra) > 0 && !sbuf_ends_with_newline(extra)) {
-                bbcode_append(env->bbcode, "\n", extra, eb->attrs_extra);
-            }
-            bbcode_append(env->bbcode, sbuf_string(eb->extra), extra, eb->attrs_extra);
-        }
+        extra = edit_append_extra_block(env, eb, extra, eb->extra);
     }
 
     // calculate rows and row/col position (account for dynamic line number width)
@@ -1093,7 +1175,7 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
         cursor_row_for_display = (eb->force_linear_line_numbers ? -1 : rc.row);
         cursor_line_for_display = (eb->force_linear_line_numbers ? -1 : cursor_logical_line);
 
-        if (env->show_line_numbers) {
+        if (line_numbers_enabled(env)) {
             ssize_t max_line_number_width = 0;
             if (logical_line_count > 0) {
                 char line_number_str[16];
@@ -1136,23 +1218,32 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
         rows, rc.row, rc.col, eb->cur_rows, eb->cur_row);
 
     // only render at most terminal height rows
-    const ssize_t termh = term_get_height(env->term);
+    const ssize_t terminal_height = term_get_height(env->term);
+    const ssize_t prompt_prefix_lines = (eb->prompt_prefix_lines > 0 ? eb->prompt_prefix_lines : 0);
+    ssize_t visible_termh = terminal_height;
+    if (menu_active && prompt_prefix_lines > 0) {
+        visible_termh = terminal_height - prompt_prefix_lines;
+        if (visible_termh < 1) {
+            visible_termh = 1;
+        }
+    }
+
     ssize_t first_row = 0;        // first visible row
     ssize_t last_row = rows - 1;  // last visible row
-    if (rows > termh) {
-        first_row = rc.row - termh + 1;  // ensure cursor is visible
+    if (rows > visible_termh) {
+        first_row = rc.row - visible_termh + 1;  // ensure cursor is visible
         if (first_row < 0)
             first_row = 0;
-        last_row = first_row + termh - 1;
+        last_row = first_row + visible_termh - 1;
     }
-    assert(last_row - first_row < termh);
+    assert(last_row - first_row < visible_termh);
 
     // reduce flicker
     buffer_mode_t bmode = term_set_buffer_mode(env->term, BUFFERED);
 
     // back up to the first line
     term_start_of_line(env->term);
-    term_up(env->term, (eb->cur_row >= termh ? termh - 1 : eb->cur_row));
+    term_up(env->term, (eb->cur_row >= visible_termh ? visible_termh - 1 : eb->cur_row));
     // term_clear_lines_to_end(env->term);  // gives flicker in old Windows cmd
     // prompt
 
@@ -1170,9 +1261,9 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
 
     // overwrite trailing rows we do not use anymore
     ssize_t rrows = last_row - first_row + 1;  // rendered rows
-    if (rrows < termh && rows < eb->cur_rows) {
+    if (rrows < visible_termh && rows < eb->cur_rows) {
         ssize_t clear = eb->cur_rows - rows;
-        while (rrows < termh && clear > 0) {
+        while (rrows < visible_termh && clear > 0) {
             clear--;
             rrows++;
             term_writeln(env->term, "");
@@ -1188,7 +1279,7 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
     ssize_t actual_prompt_width;
     if (rc.row == 0) {
         actual_prompt_width = promptw;
-    } else if (env->show_line_numbers) {
+    } else if (line_numbers_enabled(env)) {
         bool cursor_row_is_continuation = false;
         ssize_t input_len = sbuf_len(eb->input);
         if (rc.row_start > 0 && rc.row_start <= input_len) {
@@ -1367,7 +1458,7 @@ static void edit_cleanup_print(ic_env_t* env, editor_t* eb, const char* final_in
                     if (newline != NULL && offset < final_len) {
                         // Print line number prefix for continuation lines if line numbers are
                         // enabled
-                        if (env->show_line_numbers) {
+                        if (line_numbers_enabled(env)) {
                             bbcode_style_open(env->bbcode, "ic-linenumbers");
                             char line_number_str[16];
                             format_line_number_prompt(line_number_str, sizeof(line_number_str),
@@ -1612,7 +1703,7 @@ static void edit_cursor_prev_word(ic_env_t* env, editor_t* eb) {
     edit_refresh(env, eb);
 }
 
-static void edit_cursor_next_ws_word(ic_env_t* env, editor_t* eb) {
+static ic_maybe_unused void edit_cursor_next_ws_word(ic_env_t* env, editor_t* eb) {
     ssize_t end = sbuf_find_ws_word_end(eb->input, eb->pos);
     if (end < 0)
         return;
@@ -1620,7 +1711,7 @@ static void edit_cursor_next_ws_word(ic_env_t* env, editor_t* eb) {
     edit_refresh(env, eb);
 }
 
-static void edit_cursor_prev_ws_word(ic_env_t* env, editor_t* eb) {
+static ic_maybe_unused void edit_cursor_prev_ws_word(ic_env_t* env, editor_t* eb) {
     ssize_t start = sbuf_find_ws_word_start(eb->input, eb->pos);
     if (start < 0)
         return;
@@ -1692,12 +1783,41 @@ static void edit_delete_all(ic_env_t* env, editor_t* eb) {
     edit_refresh(env, eb);
 }
 
-static void edit_delete_to_end_of_line(ic_env_t* env, editor_t* eb) {
-    ssize_t start = sbuf_find_line_start(eb->input, eb->pos);
-    if (start < 0)
+static bool edit_get_line_bounds(editor_t* eb, ssize_t* start, ssize_t* end) {
+    if (eb == NULL || start == NULL || end == NULL)
+        return false;
+    *start = sbuf_find_line_start(eb->input, eb->pos);
+    if (*start < 0)
+        return false;
+    *end = sbuf_find_line_end(eb->input, eb->pos);
+    if (*end < 0)
+        return false;
+    return true;
+}
+
+typedef ssize_t (*edit_boundary_finder_t)(stringbuf_t*, ssize_t);
+
+static void edit_delete_to_boundary(ic_env_t* env, editor_t* eb, edit_boundary_finder_t finder,
+                                    bool delete_to_start) {
+    if (finder == NULL)
         return;
-    ssize_t end = sbuf_find_line_end(eb->input, eb->pos);
-    if (end < 0)
+    ssize_t boundary = finder(eb->input, eb->pos);
+    if (boundary < 0)
+        return;
+    editor_start_modify(eb);
+    if (delete_to_start) {
+        sbuf_delete_from_to(eb->input, boundary, eb->pos);
+        eb->pos = boundary;
+    } else {
+        sbuf_delete_from_to(eb->input, eb->pos, boundary);
+    }
+    edit_refresh(env, eb);
+}
+
+static void edit_delete_to_end_of_line(ic_env_t* env, editor_t* eb) {
+    ssize_t start = 0;
+    ssize_t end = 0;
+    if (!edit_get_line_bounds(eb, &start, &end))
         return;
     editor_start_modify(eb);
     // if on an empty line, remove it completely
@@ -1711,11 +1831,9 @@ static void edit_delete_to_end_of_line(ic_env_t* env, editor_t* eb) {
 }
 
 static void edit_delete_to_start_of_line(ic_env_t* env, editor_t* eb) {
-    ssize_t start = sbuf_find_line_start(eb->input, eb->pos);
-    if (start < 0)
-        return;
-    ssize_t end = sbuf_find_line_end(eb->input, eb->pos);
-    if (end < 0)
+    ssize_t start = 0;
+    ssize_t end = 0;
+    if (!edit_get_line_bounds(eb, &start, &end))
         return;
     editor_start_modify(eb);
     // delete start newline if it was an empty line
@@ -1734,12 +1852,10 @@ static void edit_delete_to_start_of_line(ic_env_t* env, editor_t* eb) {
     edit_refresh(env, eb);
 }
 
-static void edit_delete_line(ic_env_t* env, editor_t* eb) {
-    ssize_t start = sbuf_find_line_start(eb->input, eb->pos);
-    if (start < 0)
-        return;
-    ssize_t end = sbuf_find_line_end(eb->input, eb->pos);
-    if (end < 0)
+static ic_maybe_unused void edit_delete_line(ic_env_t* env, editor_t* eb) {
+    ssize_t start = 0;
+    ssize_t end = 0;
+    if (!edit_get_line_bounds(eb, &start, &end))
         return;
     editor_start_modify(eb);
     // delete newline as well so no empty line is left;
@@ -1760,44 +1876,22 @@ static void edit_delete_line(ic_env_t* env, editor_t* eb) {
 }
 
 static void edit_delete_to_start_of_word(ic_env_t* env, editor_t* eb) {
-    ssize_t start = sbuf_find_word_start(eb->input, eb->pos);
-    if (start < 0)
-        return;
-    editor_start_modify(eb);
-    sbuf_delete_from_to(eb->input, start, eb->pos);
-    eb->pos = start;
-    edit_refresh(env, eb);
+    edit_delete_to_boundary(env, eb, sbuf_find_word_start, true);
 }
 
 static void edit_delete_to_end_of_word(ic_env_t* env, editor_t* eb) {
-    ssize_t end = sbuf_find_word_end(eb->input, eb->pos);
-    if (end < 0)
-        return;
-    editor_start_modify(eb);
-    sbuf_delete_from_to(eb->input, eb->pos, end);
-    edit_refresh(env, eb);
+    edit_delete_to_boundary(env, eb, sbuf_find_word_end, false);
 }
 
 static void edit_delete_to_start_of_ws_word(ic_env_t* env, editor_t* eb) {
-    ssize_t start = sbuf_find_ws_word_start(eb->input, eb->pos);
-    if (start < 0)
-        return;
-    editor_start_modify(eb);
-    sbuf_delete_from_to(eb->input, start, eb->pos);
-    eb->pos = start;
-    edit_refresh(env, eb);
+    edit_delete_to_boundary(env, eb, sbuf_find_ws_word_start, true);
 }
 
-static void edit_delete_to_end_of_ws_word(ic_env_t* env, editor_t* eb) {
-    ssize_t end = sbuf_find_ws_word_end(eb->input, eb->pos);
-    if (end < 0)
-        return;
-    editor_start_modify(eb);
-    sbuf_delete_from_to(eb->input, eb->pos, end);
-    edit_refresh(env, eb);
+static ic_maybe_unused void edit_delete_to_end_of_ws_word(ic_env_t* env, editor_t* eb) {
+    edit_delete_to_boundary(env, eb, sbuf_find_ws_word_end, false);
 }
 
-static void edit_delete_word(ic_env_t* env, editor_t* eb) {
+static ic_maybe_unused void edit_delete_word(ic_env_t* env, editor_t* eb) {
     ssize_t start = sbuf_find_word_start(eb->input, eb->pos);
     if (start < 0)
         return;
@@ -2111,6 +2205,22 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
     return true;
 }
 
+static void edit_release_editor(ic_env_t* env, editor_t* eb) {
+    if (env == NULL || eb == NULL)
+        return;
+    editstate_done(env->mem, &eb->undo);
+    editstate_done(env->mem, &eb->redo);
+    attrbuf_free(eb->attrs);
+    attrbuf_free(eb->attrs_extra);
+    sbuf_free(eb->input);
+    sbuf_free(eb->extra);
+    sbuf_free(eb->status);
+    sbuf_free(eb->hint);
+    sbuf_free(eb->hint_help);
+    sbuf_free(eb->history_prefix);
+    mem_free(env->mem, (void*)eb->prompt_text);
+}
+
 static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inline_right_text) {
     // set up an edit buffer
     editor_t eb;
@@ -2135,6 +2245,7 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     eb.prompt_begins_with_newline = (original_prompt[0] == '\n');
     char* last_line_prompt = extract_last_prompt_line(env->mem, original_prompt);
     eb.prompt_text = last_line_prompt;
+    eb.replace_prompt_line_with_number = prompt_line_should_use_line_numbers(env, &eb);
 
     eb.inline_right_text = inline_right_text;
     eb.inline_right_width = 0;
@@ -2159,13 +2270,8 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
 
     if (eb.input == NULL || eb.extra == NULL || eb.status == NULL || eb.hint == NULL ||
         eb.hint_help == NULL || eb.history_prefix == NULL) {
-        sbuf_free(eb.input);
-        sbuf_free(eb.extra);
-        sbuf_free(eb.status);
-        sbuf_free(eb.hint);
-        sbuf_free(eb.hint_help);
-        sbuf_free(eb.history_prefix);
-        mem_free(env->mem, (void*)eb.prompt_text);
+        env->current_editor = NULL;
+        edit_release_editor(env, &eb);
         return NULL;
     }
 
@@ -2514,7 +2620,7 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
         sbuf_clear(eb.status);
     }
 
-    if (!env->prompt_cleanup && env->show_line_numbers) {
+    if (!env->prompt_cleanup && line_numbers_enabled(env)) {
         eb.force_linear_line_numbers = true;
     }
 
@@ -2552,20 +2658,7 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     // Clear the current editor pointer
     env->current_editor = NULL;
 
-    // free resources
-    editstate_done(env->mem, &eb.undo);
-    editstate_done(env->mem, &eb.redo);
-    attrbuf_free(eb.attrs);
-    attrbuf_free(eb.attrs_extra);
-    sbuf_free(eb.input);
-    sbuf_free(eb.extra);
-    sbuf_free(eb.status);
-    sbuf_free(eb.hint);
-    sbuf_free(eb.hint_help);
-    sbuf_free(eb.history_prefix);
-    mem_free(env->mem,
-             (void*)eb.prompt_text);  // Free the allocated last line prompt
-
+    edit_release_editor(env, &eb);
     return res;
 }
 
@@ -2672,6 +2765,7 @@ ic_public bool ic_current_loop_reset(const char* new_buffer, const char* new_pro
         // Print prefix lines if any
         eb->prompt_prefix_lines = print_prompt_prefix_lines(env, new_prompt);
         eb->prompt_begins_with_newline = (new_prompt[0] == '\n');
+        eb->replace_prompt_line_with_number = prompt_line_should_use_line_numbers(env, eb);
     }
 
     // Update inline right text if provided

@@ -2,8 +2,25 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 
 #pragma once
@@ -42,6 +59,11 @@
 #endif
 
 #define ic_unused(x) (void)(x)
+#if defined(__GNUC__) || defined(__clang__)
+#define ic_maybe_unused __attribute__((unused))
+#else
+#define ic_maybe_unused
+#endif
 
 //-------------------------------------------------------------
 // ssize_t
@@ -62,7 +84,6 @@ static inline ssize_t to_ssize_t(size_t sz) {
 ic_private void ic_memmove(void* dest, const void* src, ssize_t n);
 ic_private void ic_memcpy(void* dest, const void* src, ssize_t n);
 ic_private void ic_memset(void* dest, uint8_t value, ssize_t n);
-ic_private bool ic_memnmove(void* dest, ssize_t dest_size, const void* src, ssize_t n);
 
 ic_private ssize_t ic_strlen(const char* s);
 ic_private bool ic_strcpy(char* dest, ssize_t dest_size /* including 0 */, const char* src);
@@ -153,7 +174,7 @@ ic_private ic_color_t ic_rgbx(ssize_t r, ssize_t g, ssize_t b);
 //-------------------------------------------------------------
 
 #if defined(IC_NO_DEBUG_MSG)
-#define debug_msg(fmt, ...) (void)(0)
+#define debug_msg(...) (void)(0)
 #else
 ic_private void debug_msg(const char* fmt, ...);
 #endif

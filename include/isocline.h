@@ -2,8 +2,25 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 #pragma once
 #ifndef IC_ISOCLINE_H
@@ -440,7 +457,7 @@ typedef char*(ic_highlight_format_fun_t)(const char* s, void* arg);
 /// using the the provided `formatted` input that is the styled `input` with
 /// bbcodes. The content of `formatted` without bbcode tags should match `input`
 /// exactly.
-void ic_highlight_formatted(ic_highlight_env_t* henv, const char* input, const char* formatted);
+void ic_highlight_formatted(ic_highlight_env_t* henv, const char* s, const char* fmt);
 
 /// \}
 
@@ -472,7 +489,7 @@ char* ic_readline_ex(const char* prompt_text, ic_completer_fun_t* completer, voi
 /// input. Pass \a NULL for the `prompt_marker` for the default marker (`"> "`).
 /// Pass \a NULL for continuation prompt marker to make it equal to the
 /// `prompt_marker`.
-void ic_set_prompt_marker(const char* prompt_marker, const char* continuation_prompt_marker);
+void ic_set_prompt_marker(const char* prompt_marker, const char* cprompt_marker);
 
 /// Get the current prompt marker.
 const char* ic_get_prompt_marker(void);
@@ -540,6 +557,26 @@ bool ic_line_numbers_are_enabled(void);
 
 /// Returns whether relative line numbers are currently active.
 bool ic_line_numbers_are_relative(void);
+
+/// Allow line numbers to remain visible even when a continuation prompt marker is configured.
+/// When disabled (default), setting a continuation prompt hides multiline line numbers.
+/// Returns the previous state.
+bool ic_enable_line_numbers_with_continuation_prompt(bool enable);
+
+/// Returns whether line numbers stay visible when a continuation prompt is set.
+bool ic_line_numbers_with_continuation_prompt_are_enabled(void);
+
+/// Replace the final line of a multi-line prompt with the line-number column.
+/// When enabled, the last PS1 line will be dropped whenever line numbers are
+/// displayed (e.g., when line numbers are active and either no PS2 is set or
+/// continuation line numbers are forced). This makes the `1|` gutter appear in
+/// place of the final prompt line so that every editable row shares a common
+/// prefix.
+bool ic_enable_line_number_prompt_replacement(bool enable);
+
+/// Returns whether the last line of a multi-line prompt is replaced by the
+/// line-number column.
+bool ic_line_number_prompt_replacement_is_enabled(void);
 
 /// Enable or disable highlighting of the current line number.
 /// When enabled (default), the line number for the line containing the cursor

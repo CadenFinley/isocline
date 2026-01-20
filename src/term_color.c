@@ -2,8 +2,25 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 
 // This file is included in "term.c"
@@ -135,20 +152,6 @@ static int_least32_t rgb_distance_rmean(uint32_t color, int r2, int g2, int b2) 
     return dist;
 }
 
-// Another approximation to delta-E CIE color distance using
-// simpler calculations. Similar to `rmean` but adds an adjustment factor
-// based on the "red/blue" difference.
-static int_least32_t rgb_distance_rbmean(uint32_t color, int r2, int g2, int b2) {
-    int r1, g1, b1;
-    color_to_rgb(IC_RGB(color), &r1, &g1, &b1);
-    int_least32_t rmean = (r1 + r2) / 2;
-    int_least32_t dr2 = sqr(r1 - r2);
-    int_least32_t dg2 = sqr(g1 - g2);
-    int_least32_t db2 = sqr(b1 - b2);
-    int_least32_t dist = 2 * dr2 + 4 * dg2 + 3 * db2 + ((rmean * (dr2 - db2)) / 256);
-    return dist;
-}
-
 // Maintain a small cache of recently used colors. Should be short enough to be
 // effectively constant time. If we ever use a more expensive color distance
 // method, we may increase the size a bit (64?) (Initial zero initialized cache
@@ -197,7 +200,6 @@ static int rgb_match(uint32_t* palette, int start, int len, rgb_cache_t* cache, 
     min = start;
     int_least32_t mindist = (INT_LEAST32_MAX) / 4;
     for (int i = start; i < len; i++) {
-        // int_least32_t dist = rgb_distance_rbmean(palette[i],r,g,b);
         int_least32_t dist = rgb_distance_rmean(palette[i], r, g, b);
         if (is_grayish_color(palette[i]) != is_grayish(r, g, b)) {
             // with few colors, make it less eager to substitute a gray for a
@@ -303,8 +305,11 @@ static void fmt_color_rgb(char* buf, ssize_t len, ic_color_t color, bool bg) {
 }
 
 static void fmt_color_ex(char* buf, ssize_t len, palette_t palette, ic_color_t color, bool bg) {
-    if (color == IC_COLOR_NONE || palette == MONOCHROME)
+    if (color == IC_COLOR_NONE || palette == MONOCHROME) {
+        if (len > 0)
+            buf[0] = '\0';
         return;
+    }
     if (palette == ANSI8) {
         fmt_color_ansi8(buf, len, color, bg);
     } else if (!color_is_rgb(color) || palette == ANSI16) {

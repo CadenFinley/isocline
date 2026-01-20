@@ -2,8 +2,25 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 #define _GNU_SOURCE  // Required for lstat on some Linux systems
 #include <fcntl.h>
@@ -341,7 +358,7 @@ static bool ls_colors_init(void) {
     return true;
 }
 
-static bool ls_valid_esc(ssize_t c) {
+static ic_maybe_unused bool ls_valid_esc(ssize_t c) {
     return ((c == 0 || c == 1 || c == 4 || c == 7 || c == 22 || c == 24 || c == 27) ||
             (c >= 30 && c <= 37) || (c >= 40 && c <= 47) || (c >= 90 && c <= 97) ||
             (c >= 100 && c <= 107));
@@ -418,11 +435,11 @@ static bool ls_colors_append(stringbuf_t* sb, file_type_t ft, const char* ext) {
 static void ls_colorize(bool no_lscolor, stringbuf_t* sb, file_type_t ft, const char* name,
                         const char* ext, char dirsep) {
     bool close = (no_lscolor ? false : ls_colors_append(sb, ft, ext));
-    sbuf_append(sb, "[!pre]");
+    sbuf_append(sb, "[ic-source]");
     sbuf_append(sb, name);
     if (dirsep != 0)
         sbuf_append_char(sb, dirsep);
-    sbuf_append(sb, "[/pre]");
+    sbuf_append(sb, "[/ic-source]");
     if (close) {
         sbuf_append(sb, "[/]");
     }
@@ -752,7 +769,9 @@ ic_public void ic_complete_filename(ic_completion_env_t* cenv, const char* prefi
     fclosure.dir_sep = dir_sep;
     fclosure.roots = roots;
     fclosure.extensions = extensions;
+    void* previous_arg = cenv->arg;
     cenv->arg = &fclosure;
     ic_complete_qword_ex(cenv, prefix, &filename_completer, &ic_char_is_filename_letter, '\\',
                          "'\"");
+    cenv->arg = previous_arg;
 }

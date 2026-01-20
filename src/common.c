@@ -2,8 +2,25 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 
 #include "common.h"
@@ -42,18 +59,6 @@ ic_private void ic_memset(void* dest, uint8_t value, ssize_t n) {
     if (dest == NULL || n <= 0)
         return;
     memset(dest, (int8_t)value, to_size_t(n));
-}
-
-ic_private bool ic_memnmove(void* dest, ssize_t dest_size, const void* src, ssize_t n) {
-    assert(dest != NULL && src != NULL);
-    if (n <= 0)
-        return true;
-    if (dest_size < n) {
-        assert(false);
-        return false;
-    }
-    memmove(dest, src, to_size_t(n));
-    return true;
 }
 
 ic_private bool ic_strcpy(char* dest, ssize_t dest_size /* including 0 */, const char* src) {
@@ -280,7 +285,10 @@ ic_private unicode_t unicode_from_qutf8(const uint8_t* s, ssize_t len, ssize_t* 
 fail:
     if (count != NULL)
         *count = 1;
-    return unicode_from_raw(s[0]);
+    uint8_t fallback = 0;
+    if (s != NULL && len > 0)
+        fallback = s[0];
+    return unicode_from_raw(fallback);
 }
 
 //-------------------------------------------------------------

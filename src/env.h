@@ -2,9 +2,27 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
+
 #pragma once
 #ifndef IC_ENV_H
 #define IC_ENV_H
@@ -53,35 +71,38 @@ struct ic_env_s {
     const char* match_braces;                          // matching braces, e.g "()[]{}"
     const char* auto_braces;                           // auto insertion braces, e.g "()[]{}\"\"''"
     const char* initial_input;                         // initial input text to insert into editor
-    char multiline_eol;                      // character used for multiline input ("\") (set to 0
-                                             // to disable)
-    bool initialized;                        // are we initialized?
-    bool noedit;                             // is rich editing possible (tty != NULL)
-    bool singleline_only;                    // allow only single line editing?
-    bool complete_nopreview;                 // do not show completion preview for each
-                                             // selection in the completion menu?
-    bool complete_autotab;                   // try to keep completing after a completion?
-    bool no_multiline_indent;                // indent continuation lines to line up under the
-                                             // initial prompt
-    bool no_help;                            // show short help line for history search etc.
-    bool no_hint;                            // allow hinting?
-    bool no_highlight;                       // enable highlighting?
-    bool no_bracematch;                      // enable brace matching?
-    bool no_autobrace;                       // enable automatic brace insertion?
-    bool no_lscolors;                        // use LSCOLORS/LS_COLORS to colorize file name
-                                             // completions?
-    bool spell_correct;                      // enable spell correction on completions?
-    bool show_line_numbers;                  // show line numbers in multiline mode?
-    bool relative_line_numbers;              // use relative line numbers when enabled?
-    bool highlight_current_line_number;      // highlight the current line number differently?
-    bool show_whitespace_characters;         // visualize spaces while editing?
-    bool prompt_cleanup;                     // after enter, rewrite prompt inline?
-    bool prompt_cleanup_add_empty_line;      // optionally add empty line after
-                                             // cleanup
-    bool prompt_cleanup_truncate_multiline;  // during cleanup, collapse multiline input
-    size_t multiline_start_line_count;       // prefill multiline prompts with this many lines
-    size_t prompt_cleanup_extra_lines;       // additional terminal lines to erase during cleanup
-    long hint_delay;                         // delay before displaying a hint in milliseconds
+    char multiline_eol;                  // character used for multiline input ("\") (set to 0
+                                         // to disable)
+    bool initialized;                    // are we initialized?
+    bool noedit;                         // is rich editing possible (tty != NULL)
+    bool singleline_only;                // allow only single line editing?
+    bool complete_nopreview;             // do not show completion preview for each
+                                         // selection in the completion menu?
+    bool complete_autotab;               // try to keep completing after a completion?
+    bool no_multiline_indent;            // indent continuation lines to line up under the
+                                         // initial prompt
+    bool no_help;                        // show short help line for history search etc.
+    bool no_hint;                        // allow hinting?
+    bool no_highlight;                   // enable highlighting?
+    bool no_bracematch;                  // enable brace matching?
+    bool no_autobrace;                   // enable automatic brace insertion?
+    bool no_lscolors;                    // use LSCOLORS/LS_COLORS to colorize file name
+                                         // completions?
+    bool spell_correct;                  // enable spell correction on completions?
+    bool show_line_numbers;              // show line numbers in multiline mode?
+    bool relative_line_numbers;          // use relative line numbers when enabled?
+    bool highlight_current_line_number;  // highlight the current line number differently?
+    bool allow_line_numbers_with_continuation_prompt;  // keep line numbers when continuation
+                                                       // prompts are active?
+    bool replace_prompt_line_with_line_number;         // swap final prompt line with line numbers?
+    bool show_whitespace_characters;                   // visualize spaces while editing?
+    bool prompt_cleanup;                               // after enter, rewrite prompt inline?
+    bool prompt_cleanup_add_empty_line;                // optionally add empty line after
+                                                       // cleanup
+    bool prompt_cleanup_truncate_multiline;            // during cleanup, collapse multiline input
+    size_t multiline_start_line_count;  // prefill multiline prompts with this many lines
+    size_t prompt_cleanup_extra_lines;  // additional terminal lines to erase during cleanup
+    long hint_delay;                    // delay before displaying a hint in milliseconds
 
     ic_key_binding_entry_t* key_bindings;  // dynamic array of custom key bindings
     ssize_t key_binding_count;

@@ -2,11 +2,29 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 #include "bbcode.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -149,7 +167,9 @@ static void bbcode_invalid(const char* fmt, ...) {
     if (getenv("ISOCLINE_BBCODE_DEBUG") != NULL) {
         va_list args;
         va_start(args, fmt);
-        vfprintf(stderr, fmt, args);
+        if (vfprintf(stderr, fmt, args) < 0) {
+            (void)0;
+        }
         va_end(args);
     }
 }
@@ -233,9 +253,11 @@ static const char* attr_update_color(const char* fname, ic_color_t* field, const
 
     // hex value
     if (value[0] == '#') {
-        uint32_t rgb = 0;
-        if (sscanf(value, "#%x", &rgb) == 1) {
-            *field = ic_rgb(rgb);
+        errno = 0;
+        char* endptr = NULL;
+        unsigned long rgb = strtoul(value + 1, &endptr, 16);
+        if (errno == 0 && endptr != NULL && *endptr == '\0' && rgb <= 0xFFFFFFUL) {
+            *field = ic_rgb((uint32_t)rgb);
         } else {
             bbcode_invalid("bbcode: invalid color code: %s\n", value);
         }
@@ -312,7 +334,6 @@ static void attr_update_width(width_t* pwidth, char default_fill, const char* va
                         (len == 1 && value[i] == '1')) {
                         width.dots = true;
                     }
-                    i += len;
                 }
             }
         }
@@ -542,13 +563,6 @@ ic_private const char* parse_skip_to_white(const char* s) {
         s++;
     }
     return parse_skip_white(s);
-}
-
-ic_private const char* parse_skip_to_end(const char* s) {
-    while (*s != 0 && *s != ']') {
-        s++;
-    }
-    return s;
 }
 
 ic_private const char* parse_attr_name(const char* s) {

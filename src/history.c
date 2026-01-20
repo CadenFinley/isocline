@@ -2,12 +2,30 @@
   Copyright (c) 2021, Daan Leijen
   Largely Modified by Caden Finley 2025 for CJ's Shell
   This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License. A copy of the license can be
-  found in the "LICENSE" file at the root of this distribution.
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 #include "history.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +118,24 @@ static void history_list_remove_at(history_t* h, history_list_t* list, ssize_t i
                 (size_t)(list->count - idx - 1) * sizeof(history_entry_t));
     }
     list->count--;
+}
+
+static bool history_write_successful(int result) {
+    if (result < 0) {
+        debug_msg("history: stream write failed\n");
+        return false;
+    }
+    return true;
+}
+
+static bool history_close_stream(FILE* f) {
+    if (f == NULL)
+        return true;
+    if (fclose(f) != 0) {
+        debug_msg("history: fclose failed\n");
+        return false;
+    }
+    return true;
 }
 
 static void history_list_prune_to_max(history_t* h, history_list_t* list) {
@@ -458,16 +494,15 @@ ic_private bool history_push_with_exit_code(history_t* h, const char* entry, int
     history_list_prune_to_max(h, &list);
     bool pruned = (list.count != before_prune);
 
-    bool need_rewrite = removed_existing || pruned;
+    const bool needs_full_rewrite = removed_existing || pruned;
 
     bool ok = false;
-    if (need_rewrite) {
+    if (needs_full_rewrite) {
         ok = history_update_file(h, &list);
     } else {
         history_entry_t* latest = (list.count > 0) ? &list.entries[list.count - 1] : NULL;
         ok = history_append_entry(h, latest);
         if (!ok && latest != NULL) {
-            need_rewrite = true;
             ok = history_update_file(h, &list);
         }
     }
@@ -507,7 +542,7 @@ ic_private void history_clear(history_t* h) {
 #ifndef _WIN32
         chmod(h->fname, S_IRUSR | S_IWUSR);
 #endif
-        fclose(f);
+        history_close_stream(f);
     }
 }
 
@@ -996,22 +1031,35 @@ static bool ic_isxdigit(int c) {
 
 static char* history_read_entry(history_t* h, FILE* f, stringbuf_t* sbuf) {
     sbuf_clear(sbuf);
-    while (!feof(f)) {
+    while (true) {
         int c = fgetc(f);
-        if (c == EOF || c == '\n')
+        if (c == EOF) {
+            if (ferror(f)) {
+                return NULL;
+            }
+            break;
+        }
+        if (c == '\n')
             break;
         if (c == '\\') {
-            c = fgetc(f);
-            if (c == 'n') {
+            int esc = fgetc(f);
+            if (esc == EOF)
+                return NULL;
+            if (esc == 'n') {
                 sbuf_append(sbuf, "\n");
-            } else if (c == 'r') {
-            } else if (c == 't') {
+            } else if (esc == 'r') {
+                continue;
+            } else if (esc == 't') {
                 sbuf_append(sbuf, "\t");
-            } else if (c == '\\') {
+            } else if (esc == '\\') {
                 sbuf_append(sbuf, "\\");
-            } else if (c == 'x') {
+            } else if (esc == 'x') {
                 int c1 = fgetc(f);
+                if (c1 == EOF)
+                    return NULL;
                 int c2 = fgetc(f);
+                if (c2 == EOF)
+                    return NULL;
                 if (ic_isxdigit(c1) && ic_isxdigit(c2)) {
                     char chr = from_xdigit(c1) * 16 + from_xdigit(c2);
                     sbuf_append_char(sbuf, chr);
@@ -1038,10 +1086,8 @@ static bool history_write_entry(const char* entry, FILE* f, stringbuf_t* sbuf) {
     if (entry == NULL)
         return true;
 
-    if (*entry == '\0') {
-        fputc('\n', f);
-        return true;
-    }
+    if (*entry == '\0')
+        return history_write_successful(fputc('\n', f));
 
     while (*entry != 0) {
         char c = *entry++;
@@ -1050,6 +1096,7 @@ static bool history_write_entry(const char* entry, FILE* f, stringbuf_t* sbuf) {
         } else if (c == '\n') {
             sbuf_append(sbuf, "\\n");
         } else if (c == '\r') {
+            continue;
         } else if (c == '\t') {
             sbuf_append(sbuf, "\\t");
         } else if (c < ' ' || c > '~' || c == '#') {
@@ -1058,13 +1105,15 @@ static bool history_write_entry(const char* entry, FILE* f, stringbuf_t* sbuf) {
             sbuf_append(sbuf, "\\x");
             sbuf_append_char(sbuf, c1);
             sbuf_append_char(sbuf, c2);
-        } else
+        } else {
             sbuf_append_char(sbuf, c);
+        }
     }
 
     if (sbuf_len(sbuf) > 0) {
         sbuf_append(sbuf, "\n");
-        fputs(sbuf_string(sbuf), f);
+        if (!history_write_successful(fputs(sbuf_string(sbuf), f)))
+            return false;
     }
     return true;
 }
@@ -1072,9 +1121,20 @@ static bool history_write_entry(const char* entry, FILE* f, stringbuf_t* sbuf) {
 static bool history_write_record(const history_entry_t* entry, FILE* f, stringbuf_t* sbuf) {
     if (entry == NULL || entry->command == NULL)
         return true;
+
     history_entry_t temp = *entry;
     history_entry_normalize_metadata(&temp);
-    fprintf(f, "# %lld %d\n", (long long)temp.timestamp, temp.exit_code);
+
+    char header[64];
+    int written =
+        snprintf(header, sizeof(header), "# %lld %d\n", (long long)temp.timestamp, temp.exit_code);
+    if (written < 0 || written >= (int)sizeof(header))
+        return false;
+
+    size_t to_write = (size_t)written;
+    if (fwrite(header, 1, to_write, f) != to_write)
+        return false;
+
     return history_write_entry(temp.command, f, sbuf);
 }
 
@@ -1093,15 +1153,26 @@ static bool history_collect_entries(history_t* h, history_list_t* list, bool ded
 
     stringbuf_t* sbuf = sbuf_new(h->mem);
     if (sbuf == NULL) {
-        fclose(f);
+        history_close_stream(f);
         return false;
     }
 
+    bool success = true;
     char header_buf[512];
-    while (true) {
-        int c = fgetc(f);
-        if (c == EOF)
+    while (success) {
+        if (feof(f)) {
+            clearerr(f);
             break;
+        }
+
+        int c = fgetc(f);
+        if (c == EOF) {
+            if (ferror(f))
+                success = false;
+            else
+                clearerr(f);
+            break;
+        }
         if (c == '\n' || c == '\r')
             continue;
 
@@ -1112,9 +1183,16 @@ static bool history_collect_entries(history_t* h, history_list_t* list, bool ded
         };
 
         if (c == '#') {
-            ungetc(c, f);
-            if (fgets(header_buf, sizeof(header_buf), f) == NULL)
+            if (ungetc(c, f) == EOF) {
+                success = false;
                 break;
+            }
+            errno = 0;
+            if (fgets(header_buf, sizeof(header_buf), f) == NULL) {
+                if (ferror(f))
+                    success = false;
+                break;
+            }
 
             const char* cursor = header_buf + 1;
             while (*cursor == ' ' || *cursor == '\t')
@@ -1146,22 +1224,51 @@ static bool history_collect_entries(history_t* h, history_list_t* list, bool ded
             }
 
             long pos_after_header = ftell(f);
-            int next_char = fgetc(f);
-            if (next_char == EOF)
+            if (pos_after_header < 0) {
+                success = false;
                 break;
+            }
+
+            int next_char = fgetc(f);
+            if (next_char == EOF) {
+                if (ferror(f))
+                    success = false;
+                break;
+            }
             if (next_char == '#') {
-                // Malformed entry without a command; rewind to process the next header.
-                fseek(f, pos_after_header, SEEK_SET);
+                if (fseek(f, pos_after_header, SEEK_SET) != 0) {
+                    success = false;
+                    break;
+                }
+                clearerr(f);
                 continue;
             }
-            ungetc(next_char, f);
+            if (ungetc(next_char, f) == EOF) {
+                clearerr(f);
+                success = false;
+                break;
+            }
         } else {
-            ungetc(c, f);
+            if (ungetc(c, f) == EOF) {
+                clearerr(f);
+                success = false;
+                break;
+            }
         }
 
+        clearerr(f);
+
         char* command = history_read_entry(h, f, sbuf);
-        if (command == NULL)
+        if (command == NULL) {
+            if (ferror(f)) {
+                success = false;
+                break;
+            }
+            if (feof(f))
+                break;
+            clearerr(f);
             continue;
+        }
 
         entry.command = command;
         history_entry_normalize_metadata(&entry);
@@ -1169,13 +1276,18 @@ static bool history_collect_entries(history_t* h, history_list_t* list, bool ded
         if (!history_list_append(h, list, entry)) {
             history_list_free(h, list);
             sbuf_free(sbuf);
-            fclose(f);
+            history_close_stream(f);
             return false;
         }
     }
 
     sbuf_free(sbuf);
-    fclose(f);
+    bool close_ok = history_close_stream(f);
+
+    if (!success) {
+        history_list_free(h, list);
+        return false;
+    }
 
     history_list_prune_to_max(h, list);
     if (dedup)
@@ -1183,7 +1295,7 @@ static bool history_collect_entries(history_t* h, history_list_t* list, bool ded
     else if (!h->allow_duplicates)
         history_list_remove_duplicates(h, list);
 
-    return true;
+    return close_ok;
 }
 
 static bool history_write_all(const history_t* h, const history_list_t* list) {
@@ -1199,21 +1311,20 @@ static bool history_write_all(const history_t* h, const history_list_t* list) {
 
     stringbuf_t* sbuf = sbuf_new(h->mem);
     if (sbuf == NULL) {
-        fclose(f);
+        history_close_stream(f);
         return false;
     }
 
     for (ssize_t i = 0; i < list->count; i++) {
         if (!history_write_record(&list->entries[i], f, sbuf)) {
             sbuf_free(sbuf);
-            fclose(f);
+            history_close_stream(f);
             return false;
         }
     }
 
     sbuf_free(sbuf);
-    fclose(f);
-    return true;
+    return history_close_stream(f);
 }
 
 static bool history_append_entry(const history_t* h, const history_entry_t* entry) {
@@ -1229,14 +1340,15 @@ static bool history_append_entry(const history_t* h, const history_entry_t* entr
 
     stringbuf_t* sbuf = sbuf_new(h->mem);
     if (sbuf == NULL) {
-        fclose(f);
+        history_close_stream(f);
         return false;
     }
 
     bool ok = history_write_record(entry, f, sbuf);
 
     sbuf_free(sbuf);
-    fclose(f);
+    if (!history_close_stream(f))
+        ok = false;
     return ok;
 }
 

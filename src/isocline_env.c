@@ -1,9 +1,26 @@
 /* ----------------------------------------------------------------------------
-    Copyright (c) 2021, Daan Leijen
-    Largely Modified by Caden Finley 2025 for CJ's Shell
-    This is free software; you can redistribute it and/or modify it
-    under the terms of the MIT License. A copy of the license can be
-    found in the "LICENSE" file at the root of this distribution.
+  Copyright (c) 2021, Daan Leijen
+  Largely Modified by Caden Finley 2025 for CJ's Shell
+  This is free software; you can redistribute it and/or modify it
+  under the terms of the MIT License.
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 -----------------------------------------------------------------------------*/
 
 /* ----------------------------------------------------------------------------
@@ -33,6 +50,18 @@ ic_private void ic_env_apply_prompt_markers(ic_env_t* env, const char* prompt_ma
     mem_free(env->mem, env->cprompt_marker);
     env->prompt_marker = mem_strdup(env->mem, prompt_marker);
     env->cprompt_marker = mem_strdup(env->mem, continuation_prompt_marker);
+}
+
+ic_private void ic_emit_continuation_indent(ic_env_t* env, const char* prompt_text) {
+    if (env == NULL || env->no_multiline_indent || env->term == NULL || env->bbcode == NULL)
+        return;
+    const char* text = (prompt_text != NULL ? prompt_text : "");
+    ssize_t textw = bbcode_column_width(env->bbcode, text);
+    ssize_t markerw = bbcode_column_width(env->bbcode, env->prompt_marker);
+    ssize_t cmarkerw = bbcode_column_width(env->bbcode, env->cprompt_marker);
+    if (cmarkerw < markerw + textw) {
+        term_write_repeat(env->term, " ", markerw + textw - cmarkerw);
+    }
 }
 
 //-------------------------------------------------------------
@@ -80,13 +109,15 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->show_line_numbers = true;              // line numbers
     env->relative_line_numbers = false;         // absolute numbering by default
     env->highlight_current_line_number = true;  // highlight current line number by default
-    env->complete_nopreview = false;            // completion preview (inverted: false = enabled)
-    env->no_hint = false;                       // hint (inverted: false = enabled)
-    env->complete_autotab = false;              // auto tab (disabled by default)
-    env->no_help = false;                       // inline help (inverted: false = enabled)
-    env->no_multiline_indent = false;           // multiline indent (inverted: false = enabled)
-    env->singleline_only = false;               // multiline (inverted: false = enabled)
-    env->multiline_start_line_count = 1;        // preallocated prompt lines when multiline is on
+    env->allow_line_numbers_with_continuation_prompt = false;  // keep legacy suppression by default
+    env->replace_prompt_line_with_line_number = false;  // keep final prompt line visible by default
+    env->complete_nopreview = false;      // completion preview (inverted: false = enabled)
+    env->no_hint = false;                 // hint (inverted: false = enabled)
+    env->complete_autotab = false;        // auto tab (disabled by default)
+    env->no_help = false;                 // inline help (inverted: false = enabled)
+    env->no_multiline_indent = false;     // multiline indent (inverted: false = enabled)
+    env->singleline_only = false;         // multiline (inverted: false = enabled)
+    env->multiline_start_line_count = 1;  // preallocated prompt lines when multiline is on
 
     if (env->tty == NULL || env->term == NULL || env->completions == NULL || env->history == NULL ||
         env->bbcode == NULL || !term_is_interactive(env->term)) {
