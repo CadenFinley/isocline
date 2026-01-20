@@ -4,8 +4,6 @@ Isocline is a pure C line-editing and terminal-formatting library that you can d
 
 Originally authored by Daan Leijen for the [Koka] compiler, this fork keeps the MIT license while modernizing the internals for contemporary shells, REPLs, and scripting hosts.
 
-> **2025 rewrite.** Caden Finley rewrote the majority of Isocline for CJ's Shell, expanding the codebase to roughly 15k lines of production C while keeping the public API stable. Expect faster redraws, richer completion hooks, better diagnostics, and more color/TUI helpers than the 2022 v1.0.9 release.
-
 ## Highlights
 
 - **Feature-rich line editing:** multi-line mode (`Shift+Tab`), undo/redo, brace matching, inline hints, syntax highlighting, completion menus, and incremental history search are built in.
