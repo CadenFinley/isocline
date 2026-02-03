@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  isocline_env.c
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,7 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
 
 /* ----------------------------------------------------------------------------
     Environment lifecycle management extracted from the original isocline.c.
@@ -118,6 +123,8 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->no_multiline_indent = false;     // multiline indent (inverted: false = enabled)
     env->singleline_only = false;         // multiline (inverted: false = enabled)
     env->multiline_start_line_count = 1;  // preallocated prompt lines when multiline is on
+    env->status_hint_mode = IC_STATUS_HINT_NORMAL;    // default to legacy behavior
+    env->inline_right_prompt_follows_cursor = false;  // keep right prompt anchored at row 0
 
     if (env->tty == NULL || env->term == NULL || env->completions == NULL || env->history == NULL ||
         env->bbcode == NULL || !term_is_interactive(env->term)) {
@@ -129,7 +136,7 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     bbcode_style_def(env->bbcode, "ic-linenumbers", "ansi-lightgray");
     bbcode_style_def(env->bbcode, "ic-linenumber-current", "ansi-yellow");
     bbcode_style_def(env->bbcode, "ic-info", "ansi-darkgray");
-    bbcode_style_def(env->bbcode, "ic-status", "ansi-darkgray");
+    bbcode_style_def(env->bbcode, "ic-status", "ansi-lightgray");
     bbcode_style_def(env->bbcode, "ic-source", "#ffffd7");
     bbcode_style_def(env->bbcode, "ic-diminish", "ansi-lightgray");
     bbcode_style_def(env->bbcode, "ic-emphasis", "#ffffd7");

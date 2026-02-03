@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  history.h
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,8 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
+
 #pragma once
 #ifndef IC_HISTORY_H
 #define IC_HISTORY_H
@@ -55,6 +61,8 @@ ic_private history_t* history_new(alloc_t* mem);
 ic_private void history_free(history_t* h);
 ic_private void history_clear(history_t* h);
 ic_private bool history_enable_duplicates(history_t* h, bool enable);
+ic_private bool history_set_fuzzy_case_sensitive(history_t* h, bool enable);
+ic_private bool history_is_fuzzy_case_sensitive(const history_t* h);
 ic_private ssize_t history_count(const history_t* h);
 
 ic_private void history_load_from(history_t* h, const char* fname, long max_entries);
@@ -89,5 +97,10 @@ ic_private bool history_fuzzy_search(const history_t* h, const char* query,
                                      history_match_t* matches, ssize_t max_matches,
                                      ssize_t* match_count, bool* exit_filter_applied,
                                      int* exit_filter_value);
+
+ic_private bool history_fuzzy_search_with_case(const history_t* h, const char* query,
+                                               history_match_t* matches, ssize_t max_matches,
+                                               ssize_t* match_count, bool* exit_filter_applied,
+                                               int* exit_filter_value, bool case_sensitive);
 
 #endif  // IC_HISTORY_H

@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  completions.c
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,8 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
+
 #include "completions.h"
 
 #include <stdint.h>
@@ -270,6 +276,19 @@ ic_private const char* completions_get_source(completions_t* cms, ssize_t index)
     return cm->source;
 }
 
+ic_private bool completions_all_sources_equal(completions_t* cms, const char* source) {
+    if (cms == NULL || source == NULL || cms->count <= 0)
+        return false;
+    for (ssize_t i = 0; i < cms->count; ++i) {
+        completion_t* cm = completions_get(cms, i);
+        if (cm == NULL || cm->source == NULL)
+            return false;
+        if (strcmp(cm->source, source) != 0)
+            return false;
+    }
+    return true;
+}
+
 ic_private const char* completions_get_hint(completions_t* cms, ssize_t index, const char** help) {
     if (help != NULL) {
         *help = NULL;
@@ -337,18 +356,11 @@ ic_private ssize_t completions_apply(completions_t* cms, ssize_t index, stringbu
     return completion_apply(cm, sbuf, pos);
 }
 
-static int completion_compare(const void* p1, const void* p2) {
-    if (p1 == NULL || p2 == NULL)
-        return 0;
-    const completion_t* cm1 = (const completion_t*)p1;
-    const completion_t* cm2 = (const completion_t*)p2;
-    return ic_stricmp(cm1->replacement, cm2->replacement);
-}
-
 ic_private void completions_sort(completions_t* cms) {
-    if (cms->count <= 0)
+    if (cms == NULL) {
         return;
-    qsort(cms->elems, to_size_t(cms->count), sizeof(cms->elems[0]), &completion_compare);
+    }
+    // preserve insertion order; intentionally no sorting
 }
 
 #define IC_MAX_PREFIX (256)
@@ -421,6 +433,11 @@ ic_private ssize_t completions_apply_longest_prefix(completions_t* cms, stringbu
         }
 
         final_prefix[idx] = '\0';
+
+        if (prefix_len > 0 && original_prefix != NULL) {
+            if (memcmp(final_prefix, original_prefix, prefix_len) != 0)
+                continue;
+        }
 
         if (!common_initialized) {
             memcpy(common, final_prefix, idx + 1);

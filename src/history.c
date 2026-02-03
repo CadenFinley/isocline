@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  history.c
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,8 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
+
 #include "history.h"
 
 #include <ctype.h>
@@ -42,6 +48,7 @@ struct history_s {
     const char* fname;
     alloc_t* mem;
     bool allow_duplicates;
+    bool fuzzy_case_sensitive;
     ssize_t max_entries;
     char* scratch;
     ssize_t scratch_cap;
@@ -340,6 +347,7 @@ ic_private history_t* history_new(alloc_t* mem) {
         return NULL;
     h->mem = mem;
     h->allow_duplicates = false;
+    h->fuzzy_case_sensitive = true;
     h->max_entries = IC_DEFAULT_HISTORY;
     h->scratch = NULL;
     h->scratch_cap = 0;
@@ -363,6 +371,20 @@ ic_private bool history_enable_duplicates(history_t* h, bool enable) {
     bool prev = h->allow_duplicates;
     h->allow_duplicates = enable;
     return prev;
+}
+
+ic_private bool history_set_fuzzy_case_sensitive(history_t* h, bool enable) {
+    if (h == NULL)
+        return true;
+    bool prev = h->fuzzy_case_sensitive;
+    h->fuzzy_case_sensitive = enable;
+    return prev;
+}
+
+ic_private bool history_is_fuzzy_case_sensitive(const history_t* h) {
+    if (h == NULL)
+        return true;
+    return h->fuzzy_case_sensitive;
 }
 
 static const char* history_set_scratch(history_t* h, const char* entry) {
@@ -668,7 +690,7 @@ ic_private bool history_search_prefix(const history_t* h, ssize_t from, const ch
 }
 
 static int fuzzy_match_score(const char* entry, const char* query, ssize_t* match_pos,
-                             ssize_t* match_len) {
+                             ssize_t* match_len, bool case_sensitive) {
     if (entry == NULL || query == NULL || query[0] == '\0') {
         return -1;
     }
@@ -683,10 +705,10 @@ static int fuzzy_match_score(const char* entry, const char* query, ssize_t* matc
     bool in_match = false;
 
     while (*e && *q) {
-        char e_lower = (*e >= 'A' && *e <= 'Z') ? (*e + 32) : *e;
-        char q_lower = (*q >= 'A' && *q <= 'Z') ? (*q + 32) : *q;
+        char e_compare = case_sensitive ? *e : ic_tolower(*e);
+        char q_compare = case_sensitive ? *q : ic_tolower(*q);
 
-        if (e_lower == q_lower) {
+        if (e_compare == q_compare) {
             if (first_match == -1) {
                 first_match = e - entry;
             }
@@ -705,8 +727,12 @@ static int fuzzy_match_score(const char* entry, const char* query, ssize_t* matc
                 score += 10;
             }
 
-            if (*e == *q) {
-                score += 2;
+            if (case_sensitive) {
+                if (*e == *q) {
+                    score += 2;
+                }
+            } else {
+                score += 2;  // reward matches equally regardless of original casing
             }
 
             q++;
@@ -800,10 +826,10 @@ static bool history_parse_exit_code_token(const char* token, size_t len, int* ex
     return true;
 }
 
-ic_private bool history_fuzzy_search(const history_t* h, const char* query,
-                                     history_match_t* matches, ssize_t max_matches,
-                                     ssize_t* match_count, bool* exit_filter_applied,
-                                     int* exit_filter_value) {
+ic_private bool history_fuzzy_search_with_case(const history_t* h, const char* query,
+                                               history_match_t* matches, ssize_t max_matches,
+                                               ssize_t* match_count, bool* exit_filter_applied,
+                                               int* exit_filter_value, bool case_sensitive) {
     if (exit_filter_applied)
         *exit_filter_applied = false;
     if (exit_filter_value)
@@ -935,7 +961,8 @@ ic_private bool history_fuzzy_search(const history_t* h, const char* query,
 
             ssize_t mpos = 0;
             ssize_t mlen = 0;
-            int score = fuzzy_match_score(entry->command, effective_query, &mpos, &mlen);
+            int score =
+                fuzzy_match_score(entry->command, effective_query, &mpos, &mlen, case_sensitive);
 
             if (score >= 0) {
                 score += (int)(offset / 10);
@@ -979,6 +1006,16 @@ ic_private bool history_fuzzy_search(const history_t* h, const char* query,
     history_list_free(mutable_h, &list);
 
     return count > 0;
+}
+
+ic_private bool history_fuzzy_search(const history_t* h, const char* query,
+                                     history_match_t* matches, ssize_t max_matches,
+                                     ssize_t* match_count, bool* exit_filter_applied,
+                                     int* exit_filter_value) {
+    history_t* mutable_h = (history_t*)h;
+    const bool case_sensitive = history_is_fuzzy_case_sensitive(mutable_h);
+    return history_fuzzy_search_with_case(h, query, matches, max_matches, match_count,
+                                          exit_filter_applied, exit_filter_value, case_sensitive);
 }
 
 ic_private void history_load_from(history_t* h, const char* fname, long max_entries) {

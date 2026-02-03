@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  isocline.h
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,8 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
+
 #pragma once
 #ifndef IC_ISOCLINE_H
 #define IC_ISOCLINE_H
@@ -137,6 +143,42 @@ typedef const char*(ic_status_message_fun_t)(const char* input_buffer, void* arg
 /// @param callback The callback that produces the status message, or NULL to disable
 /// @param arg User-provided argument forwarded to the callback
 void ic_set_status_message_callback(ic_status_message_fun_t* callback, void* arg);
+
+/// Callback invoked when isocline is about to submit the current buffer.
+/// Return `true` to exit the readline loop and hand the buffer back to the caller.
+/// Return `false` to keep editing; isocline inserts a newline (when multiline editing is enabled)
+/// and continues reading input.
+/// @param input_buffer Current UTF-8 buffer contents (never NULL; empty string when buffer is
+/// empty)
+/// @param arg User-provided argument passed to ic_set_check_for_continuation_or_return_callback()
+typedef bool(ic_check_for_continuation_or_return_fun_t)(const char* input_buffer, void* arg);
+
+/// Configure the continuation-or-return callback.
+/// The callback runs whenever the user presses Enter, when ic_request_submit() fires, and when
+/// the initial buffer ends with a newline. Pass NULL to restore the default behavior (always
+/// submit immediately).
+/// @param callback The callback that decides whether to exit the readline loop.
+/// @param arg User-provided argument forwarded to the callback
+void ic_set_check_for_continuation_or_return_callback(
+    ic_check_for_continuation_or_return_fun_t* callback, void* arg);
+
+/// Controls when the built-in status hint line (the underlined control hints) is displayed.
+/// - `IC_STATUS_HINT_OFF`: never show the built-in hints.
+/// - `IC_STATUS_HINT_NORMAL`: show only when both the input buffer and the status line are empty.
+/// - `IC_STATUS_HINT_TRANSIENT`: show whenever the status line has no other content (default).
+/// - `IC_STATUS_HINT_PERSISTENT`: always show and prepend the hints above other status messages.
+typedef enum ic_status_hint_mode_e {
+    IC_STATUS_HINT_OFF = 0,
+    IC_STATUS_HINT_NORMAL,
+    IC_STATUS_HINT_TRANSIENT,
+    IC_STATUS_HINT_PERSISTENT,
+} ic_status_hint_mode_t;
+
+/// Set when the default status hint line should be rendered. Returns the previous mode.
+ic_status_hint_mode_t ic_set_status_hint_mode(ic_status_hint_mode_t mode);
+
+/// Get the current status hint rendering mode.
+ic_status_hint_mode_t ic_get_status_hint_mode(void);
 
 /// Queue multiple key events so they are processed before the next read.
 /// Returns `false` if the readline environment is not yet initialized.
@@ -514,6 +556,13 @@ bool ic_enable_color(bool enable);
 /// Returns the previous setting.
 bool ic_enable_history_duplicates(bool enable);
 
+/// Configure whether the fuzzy history search menu matches case-sensitively (default: enabled).
+/// Returns the previous setting.
+bool ic_enable_history_fuzzy_case_sensitive(bool enable);
+
+/// Report whether the fuzzy history search menu currently matches case-sensitively.
+bool ic_history_fuzzy_search_is_case_sensitive(void);
+
 /// Disable or enable automatic tab completion after a completion
 /// to expand as far as possible if the completions are unique. (disabled by
 /// default). Returns the previous setting.
@@ -616,15 +665,29 @@ bool ic_enable_prompt_cleanup(bool enable, size_t extra_lines
                                            = 0
 #endif
 );
+bool ic_prompt_cleanup_is_enabled(void);
+size_t ic_prompt_cleanup_extra_lines(void);
+bool ic_enable_prompt_cleanup_newline(bool enable);
+bool ic_prompt_cleanup_newline_is_enabled(void);
 
 /// Enable or disable inserting an empty line after prompt cleanup output.
 /// Returns the previous setting.
 bool ic_enable_prompt_cleanup_empty_line(bool enable);
+bool ic_prompt_cleanup_empty_line_is_enabled(void);
 
 /// Enable or disable multiline truncation during prompt cleanup.
 /// When enabled, multiline submissions are collapsed to the first line followed by an ellipsis.
 /// Returns the previous setting.
 bool ic_enable_prompt_cleanup_truncate_multiline(bool enable);
+bool ic_prompt_cleanup_truncate_multiline_is_enabled(void);
+
+/// Enable or disable cursor-tracking for the inline right prompt (RPS1).
+/// When enabled, the right-aligned prompt is re-rendered on the same terminal row as the cursor
+/// instead of remaining pinned to the first editable row. Returns the previous setting.
+bool ic_enable_inline_right_prompt_cursor_follow(bool enable);
+
+/// Returns whether the right-aligned prompt follows the cursor height.
+bool ic_inline_right_prompt_follows_cursor(void);
 
 /// Disable or enable hinting (enabled by default)
 /// Shows a hint inline when there is a single possible completion.

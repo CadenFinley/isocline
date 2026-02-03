@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  tty.c
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,8 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
+
 #include "tty.h"
 
 #include <locale.h>
@@ -214,6 +220,10 @@ static code_t modify_code(code_t code, bool in_paste_mode) {
     else if (key == key_char('\x1F') && (mods & KEY_MOD_ALT) == 0) {
         key = '_';
         code = WITH_CTRL(key_char('_'));
+    }
+
+    else if (in_paste_mode && key == KEY_ENTER) {
+        code = KEY_LINEFEED;
     }
 
     else if (key == KEY_ENTER &&

@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  isocline_options.c
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,7 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
 
 /* ----------------------------------------------------------------------------
     Runtime configuration helpers split from the original isocline.c file.
@@ -119,6 +124,20 @@ ic_public bool ic_enable_history_duplicates(bool enable) {
     if (env == NULL)
         return false;
     return history_enable_duplicates(env->history, enable);
+}
+
+ic_public bool ic_enable_history_fuzzy_case_sensitive(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return true;
+    return history_set_fuzzy_case_sensitive(env->history, enable);
+}
+
+ic_public bool ic_history_fuzzy_search_is_case_sensitive(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return true;
+    return history_is_fuzzy_case_sensitive(env->history);
 }
 
 ic_public void ic_set_history(const char* fname, long max_entries) {
@@ -379,6 +398,33 @@ ic_public bool ic_enable_inline_help(bool enable) {
     return !prev;
 }
 
+ic_public ic_status_hint_mode_t ic_set_status_hint_mode(ic_status_hint_mode_t mode) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return IC_STATUS_HINT_NORMAL;
+
+    ic_status_hint_mode_t prev = env->status_hint_mode;
+    switch (mode) {
+        case IC_STATUS_HINT_OFF:
+        case IC_STATUS_HINT_NORMAL:
+        case IC_STATUS_HINT_TRANSIENT:
+        case IC_STATUS_HINT_PERSISTENT:
+            env->status_hint_mode = mode;
+            break;
+        default:
+            env->status_hint_mode = IC_STATUS_HINT_NORMAL;
+            break;
+    }
+    return prev;
+}
+
+ic_public ic_status_hint_mode_t ic_get_status_hint_mode(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return IC_STATUS_HINT_NORMAL;
+    return env->status_hint_mode;
+}
+
 ic_public bool ic_enable_prompt_cleanup(bool enable, size_t extra_lines) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -387,6 +433,36 @@ ic_public bool ic_enable_prompt_cleanup(bool enable, size_t extra_lines) {
     env->prompt_cleanup = enable;
     env->prompt_cleanup_extra_lines = extra_lines;
     return prev;
+}
+
+ic_public bool ic_prompt_cleanup_is_enabled(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    return env->prompt_cleanup;
+}
+
+ic_public size_t ic_prompt_cleanup_extra_lines(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return 0;
+    return env->prompt_cleanup_extra_lines;
+}
+
+ic_public bool ic_enable_prompt_cleanup_newline(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->prompt_cleanup_newline_after_execution;
+    env->prompt_cleanup_newline_after_execution = enable;
+    return prev;
+}
+
+ic_public bool ic_prompt_cleanup_newline_is_enabled(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    return env->prompt_cleanup_newline_after_execution;
 }
 
 ic_public bool ic_enable_prompt_cleanup_empty_line(bool enable) {
@@ -398,6 +474,13 @@ ic_public bool ic_enable_prompt_cleanup_empty_line(bool enable) {
     return prev;
 }
 
+ic_public bool ic_prompt_cleanup_empty_line_is_enabled(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    return env->prompt_cleanup_add_empty_line;
+}
+
 ic_public bool ic_enable_prompt_cleanup_truncate_multiline(bool enable) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -405,6 +488,29 @@ ic_public bool ic_enable_prompt_cleanup_truncate_multiline(bool enable) {
     bool prev = env->prompt_cleanup_truncate_multiline;
     env->prompt_cleanup_truncate_multiline = enable;
     return prev;
+}
+
+ic_public bool ic_prompt_cleanup_truncate_multiline_is_enabled(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    return env->prompt_cleanup_truncate_multiline;
+}
+
+ic_public bool ic_enable_inline_right_prompt_cursor_follow(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->inline_right_prompt_follows_cursor;
+    env->inline_right_prompt_follows_cursor = enable;
+    return prev;
+}
+
+ic_public bool ic_inline_right_prompt_follows_cursor(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    return env->inline_right_prompt_follows_cursor;
 }
 
 ic_public bool ic_enable_brace_matching(bool enable) {
@@ -567,6 +673,15 @@ ic_public void ic_set_status_message_callback(ic_status_message_fun_t* callback,
         return;
     env->status_message_callback = callback;
     env->status_message_arg = arg;
+}
+
+ic_public void ic_set_check_for_continuation_or_return_callback(
+    ic_check_for_continuation_or_return_fun_t* callback, void* arg) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return;
+    env->continuation_check_callback = callback;
+    env->continuation_check_arg = arg;
 }
 
 ic_public void ic_free(void* p) {

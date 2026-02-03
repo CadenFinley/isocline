@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  isocline_keybindings.c
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,7 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
 
 /* ----------------------------------------------------------------------------
     Key binding related public APIs and profile helpers extracted from the
@@ -172,6 +177,7 @@ static const keybinding_profile_action_spec_t keybinding_profile_default_spec_en
     {IC_KEY_ACTION_UNDO, SPEC_UNDO},
     {IC_KEY_ACTION_REDO, SPEC_REDO},
     {IC_KEY_ACTION_COMPLETE, SPEC_COMPLETE},
+    {IC_KEY_ACTION_SHOW_HELP, SPEC_SHOW_HELP},
     {IC_KEY_ACTION_INSERT_NEWLINE, SPEC_INSERT_NEWLINE},
 };
 
@@ -542,13 +548,12 @@ ic_public bool ic_format_key_spec(ic_keycode_t key, char* buffer, size_t buflen)
     bool first = true;
 
     ic_keycode_t mods = IC_KEY_MODS(key);
+    ic_keycode_t base = IC_KEY_NO_MODS(key);
     bool implicit_ctrl = false;
-    ic_keycode_t base = key;
-    if ((mods & IC_KEY_MOD_CTRL) == 0 && key >= IC_KEY_CTRL_A && key <= IC_KEY_CTRL_Z) {
+    bool prefer_named_ctrl_label = (base == IC_KEY_TAB);
+    if ((mods & IC_KEY_MOD_CTRL) == 0 && !prefer_named_ctrl_label && base >= IC_KEY_CTRL_A &&
+        base <= IC_KEY_CTRL_Z) {
         implicit_ctrl = true;
-        base = key;
-    } else {
-        base = IC_KEY_NO_MODS(key);
     }
 
     if ((mods & IC_KEY_MOD_CTRL) != 0 || implicit_ctrl) {

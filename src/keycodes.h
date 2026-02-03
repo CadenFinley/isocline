@@ -1,8 +1,13 @@
-/* ----------------------------------------------------------------------------
-  Copyright (c) 2021, Daan Leijen
-  Largely Modified by Caden Finley 2025 for CJ's Shell
-  This is free software; you can redistribute it and/or modify it
-  under the terms of the MIT License.
+/*
+  keycodes.h
+
+  This file is part of isocline
+
+  MIT License
+
+  Copyright (c) 2026 Caden Finley
+  Copyright (c) 2021 Daan Leijen
+  Largely modified for CJ's Shell
 
   Permission is hereby granted, free of charge, to any person obtaining a copy
   of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +26,8 @@
   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
   SOFTWARE.
------------------------------------------------------------------------------*/
+*/
+
 #pragma once
 #ifndef IC_KEYCODES_H
 #define IC_KEYCODES_H
@@ -112,6 +118,7 @@ typedef uint32_t ic_keycode_t;
 #define IC_KEY_EVENT_STOP (IC_KEY_EVENT_BASE + 3)
 #define IC_KEY_PASTE_START (IC_KEY_EVENT_BASE + 4)  // Bracketed paste start (ESC[200~)
 #define IC_KEY_PASTE_END (IC_KEY_EVENT_BASE + 5)    // Bracketed paste end (ESC[201~)
+#define IC_KEY_EVENT_PROMPT_REFRESH (IC_KEY_EVENT_BASE + 6)
 
 // Convenience macros (mirroring legacy names)
 #define IC_KEY_CTRL_UP (IC_KEY_WITH_CTRL(IC_KEY_UP))
