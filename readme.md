@@ -1,5 +1,7 @@
 # Isocline (CJSH Fork)
 
+Designed and maintained by Caden Finley (https://cadenfinley.com/) as part of CJ's Shell (https://github.com/cadenfinley/cjsshell).
+
 Isocline is a pure C line-editing and terminal-formatting library designed as a modern drop-in replacement for GNU readline. This fork keeps the upstream MIT license and zero-dependency ethos while expanding the feature surface for CJ's Shell (cjsh), language REPLs, and custom CLI hosts that want richer UX without pulling in external runtimes.
 
 The code lives in `src/isocline/` and is distributed together with `include/isocline.h` so it can be vendored directly or built as a static library.
