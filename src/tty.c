@@ -241,6 +241,11 @@ ic_private bool tty_read_timeout(tty_t* tty, long timeout_ms, code_t* code) {
         uint8_t c;
 
         if (!tty_readc_noblock(tty, &c, timeout_ms)) {
+            if (tty->term_resize_event) {
+                *code = KEY_EVENT_RESIZE;
+                tty->term_resize_event = false;
+                return true;
+            }
             if (timeout_ms < 0 && tty->push_count > 0) {
                 continue;
             }
@@ -537,6 +542,26 @@ ic_private bool tty_is_utf8(const tty_t* tty) {
     return (tty->is_utf8);
 }
 
+ic_private bool tty_is_raw_enabled(const tty_t* tty) {
+    if (tty == NULL)
+        return false;
+    return tty->raw_enabled;
+}
+
+ic_private bool tty_input_pending(const tty_t* tty) {
+    if (tty == NULL)
+        return false;
+    if (tty->push_count > 0 || tty->cpush_count > 0)
+        return true;
+#if defined(FIONREAD)
+    int navail = 0;
+    if (ioctl(tty->fd_in, FIONREAD, &navail) == 0) {
+        return (navail > 0);
+    }
+#endif
+    return false;
+}
+
 ic_private bool tty_term_resize_event(tty_t* tty) {
     if (tty == NULL)
         return true;
@@ -817,6 +842,15 @@ static void signals_restore(void) {
 }
 
 #endif
+
+ic_public void ic_notify_resize(void) {
+#if !defined(_WIN32) && defined(SIGWINCH) && defined(SA_RESTART)
+    if (sig_tty != NULL) {
+        sig_tty->term_resize_event = true;
+        tty_wakeup(sig_tty);
+    }
+#endif
+}
 
 ic_private bool tty_start_raw(tty_t* tty) {
     if (tty == NULL)

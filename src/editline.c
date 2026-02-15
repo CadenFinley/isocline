@@ -308,6 +308,8 @@ ic_private char* ic_editline(ic_env_t* env, const char* prompt_text,
     tty_end_raw(env->tty);
     term_writeln(env->term, "");
     term_flush(env->term);
+    term_set_track_output(env->term, true);
+    term_reset_line_state(env->term);
     return line;
 }
 
@@ -2076,43 +2078,9 @@ static void editor_auto_indent(editor_t* eb, const char* pre, const char* post) 
     }
 }
 
-static bool edit_try_expand_abbreviation(ic_env_t* env, editor_t* eb, bool boundary_char_present,
-                                         bool modification_started) {
-    if (env == NULL || eb == NULL)
-        return false;
-    if (env->abbreviation_count <= 0 || env->abbreviations == NULL)
-        return false;
-
-    ssize_t boundary_offset = (boundary_char_present ? 1 : 0);
-    if (eb->pos <= boundary_offset)
-        return false;
-
-    const char* buffer = sbuf_string(eb->input);
-    if (buffer == NULL)
-        return false;
-
-    if (boundary_char_present) {
-        ssize_t boundary_index = eb->pos - 1;
-        if (boundary_index < 0)
-            return false;
-        if (!ic_char_is_white(buffer + boundary_index, 1))
-            return false;
-    }
-
-    ssize_t word_end = eb->pos - boundary_offset;
-    if (word_end <= 0)
-        return false;
-
-    if (word_end > 0 && ic_char_is_white(buffer + word_end - 1, 1))
-        return false;
-
-    ssize_t word_start = sbuf_find_ws_word_start(eb->input, word_end);
-    if (word_start < 0)
-        word_start = 0;
-
-    if (word_start > 0 && !ic_char_is_white(buffer + word_start - 1, 1))
-        return false;
-
+static bool edit_expand_abbreviation_for_range(ic_env_t* env, editor_t* eb, const char* buffer,
+                                               ssize_t word_start, ssize_t word_end,
+                                               ssize_t cursor_delta, bool modification_started) {
     ssize_t word_len = word_end - word_start;
     if (word_len <= 0)
         return false;
@@ -2125,11 +2093,75 @@ static bool edit_try_expand_abbreviation(ic_env_t* env, editor_t* eb, bool bound
                 editor_start_modify(eb);
             }
             sbuf_delete_at(eb->input, word_start, word_len);
-            eb->pos -= word_len;
+            if (cursor_delta < 0)
+                cursor_delta = 0;
+            eb->pos = word_start + cursor_delta;
             ssize_t new_pos = sbuf_insert_at(eb->input, entry->expansion, word_start);
             ssize_t expansion_len = new_pos - word_start;
             eb->pos += expansion_len;
             return true;
+        }
+    }
+
+    return false;
+}
+
+static bool edit_try_expand_abbreviation(ic_env_t* env, editor_t* eb, bool boundary_char_present,
+                                         bool modification_started) {
+    if (env == NULL || eb == NULL)
+        return false;
+    if (env->abbreviation_count <= 0 || env->abbreviations == NULL)
+        return false;
+
+    const char* buffer = sbuf_string(eb->input);
+    if (buffer == NULL)
+        return false;
+
+    ssize_t boundary_offset = (boundary_char_present ? 1 : 0);
+    if (boundary_char_present && eb->pos <= boundary_offset)
+        return false;
+
+    if (eb->pos > boundary_offset) {
+        if (boundary_char_present) {
+            ssize_t boundary_index = eb->pos - 1;
+            if (boundary_index < 0)
+                return false;
+            if (!ic_char_is_white(buffer + boundary_index, 1))
+                return false;
+        }
+
+        ssize_t word_end = eb->pos - boundary_offset;
+        if (word_end > 0 && !ic_char_is_white(buffer + word_end - 1, 1)) {
+            ssize_t word_start = sbuf_find_ws_word_start(eb->input, word_end);
+            if (word_start < 0)
+                word_start = 0;
+
+            if (word_start == 0 || ic_char_is_white(buffer + word_start - 1, 1)) {
+                ssize_t cursor_delta = eb->pos - word_end;
+                if (edit_expand_abbreviation_for_range(env, eb, buffer, word_start, word_end,
+                                                       cursor_delta, modification_started)) {
+                    return true;
+                }
+            } else if (boundary_char_present) {
+                return false;
+            }
+        } else if (boundary_char_present) {
+            return false;
+        }
+    }
+
+    if (!boundary_char_present) {
+        ssize_t len = sbuf_len(eb->input);
+        if (eb->pos < len && !ic_char_is_white(buffer + eb->pos, 1)) {
+            if (eb->pos == 0 || ic_char_is_white(buffer + eb->pos - 1, 1)) {
+                ssize_t word_end = sbuf_find_ws_word_end(eb->input, eb->pos);
+                if (word_end > eb->pos) {
+                    if (edit_expand_abbreviation_for_range(env, eb, buffer, eb->pos, word_end, 0,
+                                                           modification_started)) {
+                        return true;
+                    }
+                }
+            }
         }
     }
 
@@ -2414,9 +2446,23 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     eb.cur_row = 0;
     eb.modified = false;
 
+    const char* original_prompt = (prompt_text != NULL ? prompt_text : "");
+    const bool line_has_content = term_line_has_visible_content(env->term);
+    const bool cursor_at_line_start = term_is_cursor_at_line_start(env->term);
+    if (original_prompt[0] != '\n' && line_has_content && !cursor_at_line_start) {
+        attr_t newline_attr = attr_default();
+        newline_attr.x.color = IC_ANSI_BLACK;
+        newline_attr.x.bgcolor = IC_ANSI_WHITE;
+        term_set_attr(env->term, newline_attr);
+        term_write(env->term, "%");
+        term_attr_reset(env->term);
+        term_write_char(env->term, '\n');
+    }
+
+    term_set_track_output(env->term, false);
+
     // Handle multi-line prompts: print prefix lines and use only the last line
     // as the prompt
-    const char* original_prompt = (prompt_text != NULL ? prompt_text : "");
     eb.prompt_prefix_lines = print_prompt_prefix_lines(env, &eb, original_prompt);
     eb.prompt_begins_with_newline = (original_prompt[0] == '\n');
     char* last_line_prompt = extract_last_prompt_line(env->mem, original_prompt);
@@ -2440,6 +2486,8 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
 
     if (env->initial_input != NULL) {
         initial_requests_submit = insert_initial_input(env->initial_input, &eb);
+        // Expand pending abbreviations in pre-seeded buffers (e.g., typeahead with trailing space)
+        edit_expand_abbreviation_if_needed(env, &eb, false);
     } else {
         seeded_multiline_lines = apply_default_multiline_start_lines(env, &eb);
     }
@@ -2494,6 +2542,23 @@ edit_loop_entry:
                 } else {
                     edit_refresh(env, &eb);
                 }
+            }
+
+            if (eb.request_submit) {
+                // Clear history preview when submitting
+                edit_clear_history_preview(&eb);
+                if (edit_expand_abbreviation_if_needed(env, &eb, false)) {
+                    edit_refresh(env, &eb);
+                }
+                bool should_submit = edit_should_submit_current_buffer(env, &eb);
+                if (!should_submit && !env->singleline_only) {
+                    eb.request_submit = false;
+                    has_pending_key = true;
+                    pending_key = KEY_LINEFEED;
+                    continue;
+                }
+                c = KEY_ENTER;
+                break;
             }
 
             if (has_pending_key) {
@@ -2593,7 +2658,7 @@ edit_loop_entry:
                     edit_multiline_eol(env, &eb);
                 } else {
                     // otherwise done
-                    if (edit_try_expand_abbreviation(env, &eb, false, false)) {
+                    if (edit_expand_abbreviation_if_needed(env, &eb, false)) {
                         edit_refresh(env, &eb);
                     }
                     request_submit = true;
@@ -2626,8 +2691,8 @@ edit_loop_entry:
             // Editing Operations
             else
                 switch (c) {
-                    // events
-                    case KEY_EVENT_RESIZE:  // not used
+                        // events
+                    case KEY_EVENT_RESIZE:
                         edit_resize(env, &eb);
                         break;
                     case KEY_EVENT_AUTOTAB:
@@ -2807,12 +2872,18 @@ edit_loop_entry:
             pending_key = KEY_LINEFEED;
             goto edit_loop_entry;
         }
+        edit_expand_abbreviation_if_needed(env, &eb, false);
         c = KEY_ENTER;
     }
 
     // goto end
 
     eb.pos = sbuf_len(eb.input);
+
+    // Final chance to expand pending abbreviations (e.g., buffered typeahead ending in space)
+    if (!ctrl_c_pressed && !ctrl_d_pressed && c != KEY_EVENT_STOP) {
+        edit_expand_abbreviation_if_needed(env, &eb, false);
+    }
 
     if (eb.status != NULL && sbuf_len(eb.status) > 0) {
         // Ensure status lines are cleared before handing control back to the caller
