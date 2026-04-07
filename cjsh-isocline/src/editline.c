@@ -28,11 +28,20 @@
   SOFTWARE.
 */
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <ctype.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include "common.h"
 #include "completions.h"
@@ -145,6 +154,7 @@ static void edit_cursor_row_up_with_history_spell(ic_env_t* env, editor_t* eb);
 static void edit_cursor_row_down(ic_env_t* env, editor_t* eb);
 static void edit_cursor_line_start(ic_env_t* env, editor_t* eb);
 static void edit_cursor_line_end(ic_env_t* env, editor_t* eb);
+static void edit_cursor_ctrl_e(ic_env_t* env, editor_t* eb);
 static void edit_cursor_prev_word(ic_env_t* env, editor_t* eb);
 static void edit_cursor_next_word(ic_env_t* env, editor_t* eb);
 static void edit_cursor_to_start(ic_env_t* env, editor_t* eb);
@@ -162,6 +172,7 @@ static void edit_insert_char(ic_env_t* env, editor_t* eb, char c);
 static bool edit_try_expand_abbreviation(ic_env_t* env, editor_t* eb, bool boundary_char_present,
                                          bool modification_started);
 static void edit_refresh(ic_env_t* env, editor_t* eb);
+static void edit_refresh_hint(ic_env_t* env, editor_t* eb);
 static void redraw_prompt_prefix_lines(ic_env_t* env, editor_t* eb);
 
 static bool key_action_execute(ic_env_t* env, editor_t* eb, ic_key_action_t action, code_t key) {
@@ -216,7 +227,11 @@ static bool key_action_execute(ic_env_t* env, editor_t* eb, ic_key_action_t acti
             edit_cursor_line_start(env, eb);
             return true;
         case IC_KEY_ACTION_CURSOR_LINE_END:
-            edit_cursor_line_end(env, eb);
+            if (key == KEY_CTRL_E) {
+                edit_cursor_ctrl_e(env, eb);
+            } else {
+                edit_cursor_line_end(env, eb);
+            }
             return true;
         case IC_KEY_ACTION_CURSOR_WORD_PREV:
             edit_cursor_prev_word(env, eb);
@@ -464,7 +479,7 @@ static void edit_set_pos_at_rowcol(ic_env_t* env, editor_t* eb, ssize_t row, ssi
     if (pos < 0)
         return;
     eb->pos = pos;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static bool edit_pos_is_at_row_end(ic_env_t* env, editor_t* eb) {
@@ -1734,7 +1749,7 @@ static void edit_cursor_left(ic_env_t* env, editor_t* eb) {
     rowcol_t rc;
     edit_get_rowcol(env, eb, &rc);
     eb->pos = prev;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_right(ic_env_t* env, editor_t* eb) {
@@ -1745,7 +1760,7 @@ static void edit_cursor_right(ic_env_t* env, editor_t* eb) {
     rowcol_t rc;
     edit_get_rowcol(env, eb, &rc);
     eb->pos = next;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_line_end(ic_env_t* env, editor_t* eb) {
@@ -1753,7 +1768,30 @@ static void edit_cursor_line_end(ic_env_t* env, editor_t* eb) {
     if (end < 0)
         return;
     eb->pos = end;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
+}
+
+static void edit_cursor_ctrl_e(ic_env_t* env, editor_t* eb) {
+    ssize_t end = sbuf_find_line_end(eb->input, eb->pos);
+    if (end < 0)
+        return;
+
+    if (eb->pos != end) {
+        eb->pos = end;
+        edit_refresh_hint(env, eb);
+        return;
+    }
+
+    ssize_t next = sbuf_next(eb->input, end, NULL);
+    if (next <= 0)
+        return;
+
+    ssize_t next_end = sbuf_find_line_end(eb->input, end + next);
+    if (next_end < 0)
+        return;
+
+    eb->pos = next_end;
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_line_start(ic_env_t* env, editor_t* eb) {
@@ -1761,7 +1799,7 @@ static void edit_cursor_line_start(ic_env_t* env, editor_t* eb) {
     if (start < 0)
         return;
     eb->pos = start;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_next_word(ic_env_t* env, editor_t* eb) {
@@ -1769,7 +1807,7 @@ static void edit_cursor_next_word(ic_env_t* env, editor_t* eb) {
     if (end < 0)
         return;
     eb->pos = end;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_prev_word(ic_env_t* env, editor_t* eb) {
@@ -1777,7 +1815,7 @@ static void edit_cursor_prev_word(ic_env_t* env, editor_t* eb) {
     if (start < 0)
         return;
     eb->pos = start;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static ic_maybe_unused void edit_cursor_next_ws_word(ic_env_t* env, editor_t* eb) {
@@ -1785,7 +1823,7 @@ static ic_maybe_unused void edit_cursor_next_ws_word(ic_env_t* env, editor_t* eb
     if (end < 0)
         return;
     eb->pos = end;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static ic_maybe_unused void edit_cursor_prev_ws_word(ic_env_t* env, editor_t* eb) {
@@ -1793,17 +1831,17 @@ static ic_maybe_unused void edit_cursor_prev_ws_word(ic_env_t* env, editor_t* eb
     if (start < 0)
         return;
     eb->pos = start;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_to_start(ic_env_t* env, editor_t* eb) {
     eb->pos = 0;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_to_end(ic_env_t* env, editor_t* eb) {
     eb->pos = sbuf_len(eb->input);
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_row_up(ic_env_t* env, editor_t* eb) {
@@ -1945,7 +1983,7 @@ static void edit_cursor_match_brace(ic_env_t* env, editor_t* eb) {
     if (match < 0)
         return;
     eb->pos = match;
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_backspace(ic_env_t* env, editor_t* eb) {
@@ -1953,7 +1991,7 @@ static void edit_backspace(ic_env_t* env, editor_t* eb) {
         return;
     editor_start_modify(eb);
     eb->pos = sbuf_delete_char_before(eb->input, eb->pos);
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_delete_char(ic_env_t* env, editor_t* eb) {
@@ -1961,7 +1999,7 @@ static void edit_delete_char(ic_env_t* env, editor_t* eb) {
         return;
     editor_start_modify(eb);
     sbuf_delete_char_at(eb->input, eb->pos);
-    edit_refresh(env, eb);
+    edit_refresh_hint(env, eb);
 }
 
 static void edit_delete_all(ic_env_t* env, editor_t* eb) {
@@ -2336,6 +2374,110 @@ enum {
     EDIT_STATUS_HINT_KEYS_LEN = 128
 };
 
+static char* edit_escape_status_fragment(alloc_t* mem, const char* text) {
+    if (mem == NULL || text == NULL)
+        return NULL;
+
+    const ssize_t len = ic_strlen(text);
+    if (len < 0)
+        return NULL;
+
+    ssize_t extra = 0;
+    for (ssize_t i = 0; i < len; ++i) {
+        const char ch = text[i];
+        if (ch == '[' || ch == '\\') {
+            extra++;
+        }
+    }
+
+    char* escaped = mem_malloc_tp_n(mem, char, (size_t)len + (size_t)extra + 1);
+    if (escaped == NULL)
+        return NULL;
+
+    char* dest = escaped;
+    for (ssize_t i = 0; i < len; ++i) {
+        unsigned char uch = (unsigned char)text[i];
+        char ch = ((uch < 0x20 || uch == 0x7F) ? ' ' : (char)uch);
+        if (ch == '[' || ch == '\\') {
+            *dest++ = '\\';
+        }
+        *dest++ = ch;
+    }
+    *dest = '\0';
+    return escaped;
+}
+
+static bool edit_format_spell_status_hint(ic_env_t* env, editor_t* eb, char* buffer,
+                                          size_t buflen) {
+    if (env == NULL || eb == NULL || buffer == NULL || buflen == 0 || eb->input == NULL ||
+        env->completions == NULL) {
+        return false;
+    }
+
+    buffer[0] = '\0';
+
+    if (eb->pos <= 0 || completions_count(env->completions) <= 0)
+        return false;
+
+    const char* source = completions_get_source(env->completions, 0);
+    if (source == NULL || strcmp(source, "spell") != 0)
+        return false;
+
+    const char* replacement = completions_get_replacement(env->completions, 0);
+    if (replacement == NULL || replacement[0] == '\0')
+        return false;
+
+    const char* input = sbuf_string(eb->input);
+    if (input == NULL)
+        return false;
+
+    ssize_t input_len = ic_strlen(input);
+    ssize_t next_len = str_next_ofs(input, input_len, eb->pos, NULL);
+    if (next_len > 0 && !ic_char_is_separator(input + eb->pos, (long)next_len)) {
+        return false;
+    }
+
+    ssize_t word_start = edit_find_word_start(input, eb->pos);
+    if (word_start < 0 || word_start >= eb->pos)
+        return false;
+
+    char* original = mem_strndup(env->mem, input + word_start, eb->pos - word_start);
+    if (original == NULL)
+        return false;
+
+    if (strcmp(original, replacement) == 0) {
+        mem_free(env->mem, original);
+        return false;
+    }
+
+    char* escaped_original = edit_escape_status_fragment(env->mem, original);
+    char* escaped_replacement = edit_escape_status_fragment(env->mem, replacement);
+    mem_free(env->mem, original);
+
+    if (escaped_original == NULL || escaped_replacement == NULL) {
+        mem_free(env->mem, escaped_original);
+        mem_free(env->mem, escaped_replacement);
+        return false;
+    }
+
+    char completion_keys[EDIT_STATUS_HINT_KEYS_LEN];
+    format_binding_keys(env, IC_KEY_ACTION_COMPLETE, NULL, completion_keys, sizeof(completion_keys),
+                        true);
+
+    int written = snprintf(buffer, buflen, "[ic-status]spell: %s -> %s  accept: %s[/]",
+                           escaped_original, escaped_replacement, completion_keys);
+
+    mem_free(env->mem, escaped_original);
+    mem_free(env->mem, escaped_replacement);
+
+    if (written < 0) {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    return true;
+}
+
 static bool edit_format_default_status_hints(ic_env_t* env, char* buffer, size_t buflen) {
     if (env == NULL || buffer == NULL || buflen == 0) {
         return false;
@@ -2358,6 +2500,23 @@ static bool edit_format_default_status_hints(ic_env_t* env, char* buffer, size_t
         return false;
     }
     return true;
+}
+
+static bool edit_enable_menu_mouse_scroll(ic_env_t* env) {
+    if (env == NULL || env->term == NULL || !term_is_interactive(env->term)) {
+        return false;
+    }
+    term_write(env->term, "\x1b[?1000h\x1b[?1006h");
+    term_flush(env->term);
+    return true;
+}
+
+static void edit_disable_menu_mouse_scroll(ic_env_t* env, bool enabled) {
+    if (!enabled || env == NULL || env->term == NULL || !term_is_interactive(env->term)) {
+        return;
+    }
+    term_write(env->term, "\x1b[?1000l\x1b[?1006l");
+    term_flush(env->term);
 }
 
 //-------------------------------------------------------------
@@ -2441,6 +2600,33 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
         }
     }
 
+    char spell_buffer[EDIT_STATUS_HINT_BUFFER_LEN];
+    const char* spell_message = NULL;
+    if (edit_format_spell_status_hint(env, eb, spell_buffer, sizeof(spell_buffer))) {
+        spell_message = spell_buffer;
+    }
+
+    stringbuf_t* custom_combined = NULL;
+    if (spell_message != NULL) {
+        if (custom_message == NULL) {
+            custom_message = spell_message;
+        } else {
+            custom_combined = sbuf_new(eb->mem);
+            if (custom_combined != NULL) {
+                sbuf_append(custom_combined, custom_message);
+                ssize_t custom_len = sbuf_len(custom_combined);
+                if (custom_len > 0) {
+                    const char* existing = sbuf_string(custom_combined);
+                    if (existing != NULL && existing[custom_len - 1] != '\n') {
+                        sbuf_append_char(custom_combined, '\n');
+                    }
+                }
+                sbuf_append(custom_combined, spell_message);
+                custom_message = sbuf_string(custom_combined);
+            }
+        }
+    }
+
     const bool has_custom_message = (custom_message != NULL);
     const bool input_empty = (eb->input == NULL ? true : (sbuf_len(eb->input) == 0));
     const ic_status_hint_mode_t mode = env->status_hint_mode;
@@ -2511,6 +2697,9 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
     if (combined != NULL) {
         sbuf_free(combined);
     }
+    if (custom_combined != NULL) {
+        sbuf_free(custom_combined);
+    }
 
     return changed;
 }
@@ -2565,15 +2754,57 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     eb.modified = false;
 
     const char* original_prompt = (prompt_text != NULL ? prompt_text : "");
-    const bool line_has_content = term_line_has_visible_content(env->term);
-    if (original_prompt[0] != '\n' && line_has_content) {
-        attr_t newline_attr = attr_default();
-        newline_attr.x.color = IC_ANSI_BLACK;
-        newline_attr.x.bgcolor = IC_ANSI_WHITE;
-        term_set_attr(env->term, newline_attr);
-        term_write(env->term, "%");
-        term_attr_reset(env->term);
-        term_write_char(env->term, '\n');
+    bool line_has_content = term_line_has_visible_content(env->term);
+    bool cursor_at_line_start = (!line_has_content || term_is_cursor_at_line_start(env->term));
+    if (!line_has_content && env->tty != NULL && tty_input_pending(env->tty)) {
+        line_has_content = true;
+        cursor_at_line_start = false;
+    }
+    if (line_has_content && !cursor_at_line_start) {
+        ssize_t eol_width = 0;
+        const char* eol_mark = env->prompt_eol_mark;
+
+        if (eol_mark != NULL) {
+            if (env->bbcode != NULL) {
+                eol_width = bbcode_column_width(env->bbcode, eol_mark);
+                if (eol_width < 0) {
+                    eol_width = 0;
+                }
+                if (eol_mark[0] != '\0') {
+                    bbcode_print(env->bbcode, eol_mark);
+                }
+            } else {
+                eol_width = ic_strlen(eol_mark);
+                term_write(env->term, eol_mark);
+            }
+        } else {
+            char fallback_mark = '%';
+#if !defined(_WIN32)
+            if (geteuid() == 0) {
+                fallback_mark = '#';
+            }
+#endif
+
+            attr_t eol_attr = attr_default();
+            eol_attr.x.bold = IC_ON;
+            eol_attr.x.reverse = IC_ON;
+            term_set_attr(env->term, eol_attr);
+            term_write_char(env->term, fallback_mark);
+            term_attr_reset(env->term);
+            eol_width = 1;
+        }
+
+        ssize_t termw = term_get_width(env->term);
+        ssize_t pad = termw - eol_width;
+        if (pad < 0) {
+            pad = 0;
+        }
+        if (pad > 0) {
+            term_write_repeat(env->term, " ", pad);
+        }
+        term_write_char(env->term, '\r');
+        term_write_repeat(env->term, " ", eol_width);
+        term_write_char(env->term, '\r');
     }
 
     term_set_track_output(env->term, false);
@@ -2888,8 +3119,10 @@ edit_loop_entry:
                         edit_cursor_line_start(env, &eb);
                         break;
                     case KEY_END:
-                    case KEY_CTRL_E:
                         edit_cursor_line_end(env, &eb);
+                        break;
+                    case KEY_CTRL_E:
+                        edit_cursor_ctrl_e(env, &eb);
                         break;
                     case KEY_CTRL_LEFT:
                     case WITH_SHIFT(KEY_LEFT):

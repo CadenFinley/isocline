@@ -85,6 +85,24 @@ ic_public const char* ic_get_continuation_prompt_marker(void) {
     return env->cprompt_marker;
 }
 
+ic_public void ic_set_prompt_eol_mark(const char* eol_mark) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return;
+    mem_free(env->mem, env->prompt_eol_mark);
+    env->prompt_eol_mark = NULL;
+    if (eol_mark != NULL) {
+        env->prompt_eol_mark = mem_strdup(env->mem, eol_mark);
+    }
+}
+
+ic_public const char* ic_get_prompt_eol_mark(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return NULL;
+    return env->prompt_eol_mark;
+}
+
 ic_public void ic_set_prompt_marker(const char* prompt_marker, const char* cprompt_marker) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -154,15 +172,26 @@ ic_public void ic_history_remove_last(void) {
     history_remove_last(env->history);
 }
 
-ic_public void ic_history_add_with_exit_code(const char* entry, int exit_code) {
+ic_public void ic_history_add_with_metadata(const char* entry,
+                                            const ic_history_metadata_t* metadata,
+                                            size_t metadata_count) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
         return;
-    history_push_with_exit_code(env->history, entry, exit_code);
+    history_push_with_metadata(env->history, entry, metadata, metadata_count);
+}
+
+ic_public void ic_history_update_last_with_metadata(const char* entry,
+                                                    const ic_history_metadata_t* metadata,
+                                                    size_t metadata_count) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return;
+    history_update_last_with_metadata(env->history, entry, metadata, metadata_count);
 }
 
 ic_public void ic_history_add(const char* entry) {
-    ic_history_add_with_exit_code(entry, IC_HISTORY_EXIT_CODE_UNKNOWN);
+    ic_history_add_with_metadata(entry, NULL, 0);
 }
 
 ic_public void ic_history_clear(void) {

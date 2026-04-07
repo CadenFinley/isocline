@@ -4,7 +4,7 @@ Designed and maintained by Caden Finley (https://cadenfinley.com/) as part of CJ
 
 Isocline is a pure C line-editing and terminal-formatting library designed as a modern drop-in replacement for GNU readline. This fork keeps the upstream MIT license and zero-dependency ethos while expanding the feature surface for CJ's Shell (cjsh), language REPLs, and custom CLI hosts that want richer UX without pulling in external runtimes.
 
-The code lives in `src/isocline/` and is distributed together with `include/isocline.h` so it can be vendored directly or built as a static library.
+The code lives in `cjsh-isocline/src/` and is distributed with `cjsh-isocline/src/isocline.h` so it can be vendored directly or built as a static library.
 
 ## What changed compared to upstream?
 
@@ -60,23 +60,24 @@ int main(void) {
 Compile the amalgamated source when vendoring:
 
 ```bash
-gcc -std=c99 -Iinclude -c src/isocline.c
+gcc -std=c11 -Icjsh-isocline/src -c cjsh-isocline/src/isocline.c
 ```
 
 Define `IC_SEPARATE_OBJS` to build translation units individually (recommended for faster incremental builds inside cjsh).
 
 ### CMake
 
-The CJSH root `CMakeLists.txt` already exposes the library. To build it standalone:
+This repository ships a top-level `CMakeLists.txt` that builds the library and test executables:
 
 ```bash
-git clone https://github.com/CadenFinley/CJsShell
-cd CJsShell
-cmake -S . -B build/isocline -DISOCLINE_ONLY=ON   # optional helper preset
-cmake --build build/isocline -j$(nproc)
+git clone https://github.com/CadenFinley/isocline
+cd isocline
+cmake -S . -B build
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
 ```
 
-The build outputs `libisocline.a` (or `.lib` on Windows) plus the sample program in `test/example.c`.
+The build outputs `libisocline.a` (or `.lib` on Windows) plus `isocline_example` and `isocline_test_colors`. Set `-DBUILD_TESTING=OFF` if you only want the library.
 
 ## Editor capabilities
 
@@ -129,7 +130,7 @@ The build outputs `libisocline.a` (or `.lib` on Windows) plus the sample program
 | `ic_set_status_message_callback` | Surface transient status banners under the prompt |
 | `ic_async_stop` | Interrupt a running `ic_readline` from another thread |
 
-Consult `include/isocline.h` for the full API, including completion transformers, history helpers, and terminal utilities.
+Consult `cjsh-isocline/src/isocline.h` for the full API, including completion transformers, history helpers, and terminal utilities.
 
 ## Documentation
 

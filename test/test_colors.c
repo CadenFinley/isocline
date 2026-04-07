@@ -20,7 +20,7 @@ typedef enum color_order_e {
   GRB
 } color_order_t;
 
-#include "../src/bbcode_colors.c"
+#include "../cjsh-isocline/src/bbcode_colors.c"
 
 static int color_weight(ic_color_t c) {
   return (int)(c);

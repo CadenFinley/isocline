@@ -49,10 +49,6 @@ extern "C" {
 /// Token returned from ic_readline* when Ctrl+D is pressed with an empty buffer (EOF).
 #define IC_READLINE_TOKEN_CTRL_D "<CTRL+D>"
 
-#ifndef IC_HISTORY_EXIT_CODE_UNKNOWN
-#define IC_HISTORY_EXIT_CODE_UNKNOWN (-1)
-#endif
-
 /*! \mainpage
 Isocline C API reference.
 
@@ -315,9 +311,23 @@ void ic_history_remove_last(void);
 /// Clear the history.
 void ic_history_clear(void);
 
-/// Add an entry to the history with an explicit exit code. Use
-/// IC_HISTORY_EXIT_CODE_UNKNOWN when the exit status is not available.
-void ic_history_add_with_exit_code(const char* entry, int exit_code);
+/// Metadata key/value pair attached to a history entry.
+typedef struct ic_history_metadata_s {
+    const char* key;
+    const char* value;
+} ic_history_metadata_t;
+
+/// Add an entry to the history with custom metadata.
+/// Isocline always adds a timestamp metadata entry when it is missing.
+/// Isocline also maintains a `frequency` metadata entry (missing values are
+/// treated as `1`).
+void ic_history_add_with_metadata(const char* entry, const ic_history_metadata_t* metadata,
+                                  size_t metadata_count);
+
+/// Update metadata on the most recent history entry when it matches `entry`.
+/// If the latest entry differs, a new entry is added with metadata.
+void ic_history_update_last_with_metadata(const char* entry, const ic_history_metadata_t* metadata,
+                                          size_t metadata_count);
 
 /// Add an entry to the history
 void ic_history_add(const char* entry);
@@ -542,6 +552,14 @@ const char* ic_get_prompt_marker(void);
 
 /// Get the current continuation prompt marker.
 const char* ic_get_continuation_prompt_marker(void);
+
+/// Set or clear the marker used when preserving partial pre-prompt output.
+/// Pass NULL to restore the built-in default marker.
+void ic_set_prompt_eol_mark(const char* eol_mark);
+
+/// Get the current partial-line marker override.
+/// Returns NULL when the built-in default marker is active.
+const char* ic_get_prompt_eol_mark(void);
 
 /// Disable or enable multi-line input (enabled by default).
 /// Returns the previous setting.
