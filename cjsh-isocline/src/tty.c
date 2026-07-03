@@ -82,6 +82,7 @@ struct tty_s {
 #endif
     bool wake_pipe_initialized;
     bool paste_mode;
+    tty_mouse_event_t last_mouse_event;
 };
 
 #if !defined(_WIN32)
@@ -192,6 +193,32 @@ ic_private bool code_is_virt_key(code_t c) {
 
 static code_t modify_code(code_t code, bool in_paste_mode);
 
+ic_private void tty_set_last_mouse_event(tty_t* tty, const tty_mouse_event_t* event) {
+    if (tty == NULL)
+        return;
+
+    if (event == NULL) {
+        memset(&tty->last_mouse_event, 0, sizeof(tty->last_mouse_event));
+        tty->last_mouse_event.action = TTY_MOUSE_ACTION_NONE;
+        return;
+    }
+
+    tty->last_mouse_event = *event;
+}
+
+ic_private void tty_clear_last_mouse_event(tty_t* tty) {
+    tty_set_last_mouse_event(tty, NULL);
+}
+
+ic_private bool tty_get_last_mouse_event(const tty_t* tty, tty_mouse_event_t* event) {
+    if (tty == NULL || event == NULL) {
+        return false;
+    }
+
+    *event = tty->last_mouse_event;
+    return (tty->last_mouse_event.action != TTY_MOUSE_ACTION_NONE);
+}
+
 static code_t tty_read_utf8(tty_t* tty, uint8_t c0) {
     uint8_t buf[5];
     memset(buf, 0, 5);
@@ -234,6 +261,8 @@ static bool tty_code_pop(tty_t* tty, code_t* code);
 
 ic_private bool tty_read_timeout(tty_t* tty, long timeout_ms, code_t* code) {
     while (true) {
+        tty_clear_last_mouse_event(tty);
+
         if (tty_code_pop(tty, code)) {
             return true;
         }
@@ -246,14 +275,18 @@ ic_private bool tty_read_timeout(tty_t* tty, long timeout_ms, code_t* code) {
                 tty->term_resize_event = false;
                 return true;
             }
-            if (timeout_ms < 0 && tty->push_count > 0) {
-                continue;
-            }
-            /* If a blocking read (timeout_ms < 0) returned no data (likely EOF),
-               surface an explicit stop event so the caller can break out instead
-               of spinning on KEY_NONE. For non-blocking reads, keep returning
-               false as before. */
             if (timeout_ms < 0) {
+                // tty_readc_noblock can return false on wake-up notifications used
+                // by tty_code_pushback while still keeping the terminal active.
+                // Keep waiting unless the terminal was actually lost.
+                if (tty->push_count > 0 || !tty->lost_terminal) {
+                    continue;
+                }
+
+                /* If a blocking read (timeout_ms < 0) returned no data (likely EOF),
+                   surface an explicit stop event so the caller can break out instead
+                   of spinning on KEY_NONE. For non-blocking reads, keep returning
+                   false as before. */
                 *code = KEY_EVENT_STOP;
                 return true;
             }
@@ -561,6 +594,13 @@ ic_private bool tty_input_pending(const tty_t* tty) {
     return false;
 }
 
+ic_private bool tty_lost_terminal(const tty_t* tty) {
+    if (tty == NULL) {
+        return false;
+    }
+    return tty->lost_terminal;
+}
+
 ic_private bool tty_term_resize_event(tty_t* tty) {
     if (tty == NULL)
         return true;
@@ -593,6 +633,7 @@ static bool tty_read_from_fd(tty_t* tty, uint8_t* c) {
             return true;
         }
         if (nread == 0) {
+            tty->lost_terminal = true;
             return false;
         }
         if (nread < 0) {
@@ -665,6 +706,7 @@ static bool tty_readc_blocking(tty_t* tty, uint8_t* c) {
     while (true) {
         tty_event_t event = tty_wait_for_tty_event(tty);
         if (event == TTY_EVENT_ERROR) {
+            tty->lost_terminal = true;
             return false;
         }
         if (event == TTY_EVENT_WAKE) {

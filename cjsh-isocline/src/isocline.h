@@ -49,6 +49,34 @@ extern "C" {
 /// Token returned from ic_readline* when Ctrl+D is pressed with an empty buffer (EOF).
 #define IC_READLINE_TOKEN_CTRL_D "<CTRL+D>"
 
+/// Structured disposition reported by ic_readline_with_status().
+typedef enum ic_readline_disposition_e {
+    /// A normal command/input buffer was submitted.
+    IC_READLINE_DISPOSITION_SUBMIT = 0,
+    /// The user interrupted input (usually Ctrl+C on an empty buffer).
+    IC_READLINE_DISPOSITION_INTERRUPT,
+    /// End-of-file was requested (usually Ctrl+D on an empty buffer).
+    IC_READLINE_DISPOSITION_EOF,
+    /// Readline stopped because the input backend requested termination.
+    IC_READLINE_DISPOSITION_STOP,
+    /// Readline encountered an unrecoverable error.
+    IC_READLINE_DISPOSITION_ERROR,
+} ic_readline_disposition_t;
+
+/// Structured readline return value that includes terminal state metadata.
+typedef struct ic_readline_result_s {
+    /// Heap-allocated input buffer returned by readline; free with ic_free().
+    /// This can contain IC_READLINE_TOKEN_CTRL_C / IC_READLINE_TOKEN_CTRL_D for
+    /// compatibility with ic_readline().
+    char* input;
+    /// Structured return disposition for this readline cycle.
+    ic_readline_disposition_t disposition;
+    /// True when isocline is currently backed by an interactive TTY reader.
+    bool tty_active;
+    /// True when the TTY backend detected a lost terminal connection.
+    bool tty_lost;
+} ic_readline_result_t;
+
 /*! \mainpage
 Isocline C API reference.
 
@@ -103,6 +131,21 @@ Contents:
 /// @see ic_set_prompt_marker(), ic_style_def()
 char* ic_readline(const char* prompt_text, const char* inline_right_text,
                   const char* initial_input);
+
+/// Read input from the user and return structured status metadata alongside
+/// the optional input text.
+/// @param prompt_text Same as ic_readline().
+/// @param inline_right_text Same as ic_readline().
+/// @param initial_input Same as ic_readline().
+/// @returns A structured result. If `result.input` is non-NULL it must be
+///          released with ic_free().
+ic_readline_result_t ic_readline_with_status(const char* prompt_text,
+                                             const char* inline_right_text,
+                                             const char* initial_input);
+
+/// Convert an ic_readline_disposition_t into a stable lowercase string.
+/// Returns one of: "submit", "interrupt", "eof", "stop", "error".
+const char* ic_readline_disposition_name(ic_readline_disposition_t disposition);
 
 /// Queue a single key event so it is processed before the next read.
 /// Returns `false` if the readline environment is not yet initialized.
@@ -318,16 +361,10 @@ typedef struct ic_history_metadata_s {
 } ic_history_metadata_t;
 
 /// Add an entry to the history with custom metadata.
-/// Isocline always adds a timestamp metadata entry when it is missing.
-/// Isocline also maintains a `frequency` metadata entry (missing values are
-/// treated as `1`).
+/// Isocline always records `timestamp` and `frequency` metadata. When duplicate
+/// entries are disabled, `frequency` is incremented on the rewritten entry.
 void ic_history_add_with_metadata(const char* entry, const ic_history_metadata_t* metadata,
                                   size_t metadata_count);
-
-/// Update metadata on the most recent history entry when it matches `entry`.
-/// If the latest entry differs, a new entry is added with metadata.
-void ic_history_update_last_with_metadata(const char* entry, const ic_history_metadata_t* metadata,
-                                          size_t metadata_count);
 
 /// Add an entry to the history
 void ic_history_add(const char* entry);

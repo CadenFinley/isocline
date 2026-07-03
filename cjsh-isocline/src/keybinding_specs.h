@@ -64,10 +64,12 @@
 #define SPEC_DELETE_LINE_START "ctrl+u"
 #define SPEC_DELETE_LINE_END "ctrl+k"
 #define SPEC_TRANSPOSE "ctrl+t"
+#define SPEC_YANK_LAST_ARG "alt+.|alt+_"
 #define SPEC_CLEAR_SCREEN "ctrl+l"
 #define SPEC_UNDO "ctrl+z|ctrl+_"
 #define SPEC_REDO "ctrl+y"
 #define SPEC_COMPLETE "tab|alt+?"
 #define SPEC_SHOW_HELP "f1"
+#define SPEC_TOGGLE_MOUSE_REPORTING "f2"
 
 #endif  // CJSH_KEYBINDING_SPECS_H

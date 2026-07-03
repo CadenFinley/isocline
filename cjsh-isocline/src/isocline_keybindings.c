@@ -118,8 +118,15 @@ static const key_action_name_entry_t key_action_names[] = {
     {"transpose-chars", IC_KEY_ACTION_TRANSPOSE_CHARS},
     {"swap-chars", IC_KEY_ACTION_TRANSPOSE_CHARS},
 
+    {"yank-last-arg", IC_KEY_ACTION_YANK_LAST_ARG},
+    {"insert-last-argument", IC_KEY_ACTION_YANK_LAST_ARG},
+
     {"insert-newline", IC_KEY_ACTION_INSERT_NEWLINE},
     {"newline", IC_KEY_ACTION_INSERT_NEWLINE},
+
+    {"toggle-mouse-reporting", IC_KEY_ACTION_TOGGLE_MOUSE_REPORTING},
+    {"mouse-reporting-toggle", IC_KEY_ACTION_TOGGLE_MOUSE_REPORTING},
+    {"toggle-mouse", IC_KEY_ACTION_TOGGLE_MOUSE_REPORTING},
 
     {"runoff", IC_KEY_ACTION_RUNOFF},
     {"runoff-handler", IC_KEY_ACTION_RUNOFF},
@@ -173,12 +180,14 @@ static const keybinding_profile_action_spec_t keybinding_profile_default_spec_en
     {IC_KEY_ACTION_DELETE_LINE_START, SPEC_DELETE_LINE_START},
     {IC_KEY_ACTION_DELETE_LINE_END, SPEC_DELETE_LINE_END},
     {IC_KEY_ACTION_TRANSPOSE_CHARS, SPEC_TRANSPOSE},
+    {IC_KEY_ACTION_YANK_LAST_ARG, SPEC_YANK_LAST_ARG},
     {IC_KEY_ACTION_CLEAR_SCREEN, SPEC_CLEAR_SCREEN},
     {IC_KEY_ACTION_UNDO, SPEC_UNDO},
     {IC_KEY_ACTION_REDO, SPEC_REDO},
     {IC_KEY_ACTION_COMPLETE, SPEC_COMPLETE},
     {IC_KEY_ACTION_SHOW_HELP, SPEC_SHOW_HELP},
     {IC_KEY_ACTION_INSERT_NEWLINE, SPEC_INSERT_NEWLINE},
+    {IC_KEY_ACTION_TOGGLE_MOUSE_REPORTING, SPEC_TOGGLE_MOUSE_REPORTING},
 };
 
 static const keybinding_profile_t keybinding_profile_default = {
