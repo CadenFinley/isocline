@@ -100,8 +100,12 @@ typedef struct editor_s {
     const char* inline_right_text;  // inline right-aligned text on input line
     ssize_t inline_right_width;     // cached width of inline right text
     ssize_t line_number_column_width;  // cached total prefix width when line numbers are shown
-    bool mouse_reporting_enabled;  // whether this edit session has mouse reporting toggled on
-    ssize_t mouse_capture_depth;   // nested mouse tracking enablement depth
+    char* rendered_hint_snapshot;  // most recent hint text that was rendered on screen
+    ssize_t last_screen_cursor_row;  // cached absolute cursor row from the last successful query
+    ssize_t last_screen_cursor_col;  // cached absolute cursor col from the last successful query
+    bool last_screen_cursor_known;   // whether absolute cursor position cache is valid
+    bool mouse_reporting_enabled;      // whether this edit session has mouse reporting toggled on
+    ssize_t mouse_capture_depth;       // nested mouse tracking enablement depth
     alloc_t* mem;                      // allocator
     // caches
     attrbuf_t* attrs;  // reuse attribute buffers
@@ -146,6 +150,7 @@ static bool prompt_line_should_use_line_numbers(const ic_env_t* env, const edito
 
 static void edit_generate_completions(ic_env_t* env, editor_t* eb, bool autotab);
 static void edit_history_search_with_current_word(ic_env_t* env, editor_t* eb);
+static void edit_command_palette(ic_env_t* env, editor_t* eb);
 static void edit_history_prev(ic_env_t* env, editor_t* eb);
 static void edit_history_next(ic_env_t* env, editor_t* eb);
 static void edit_yank_last_arg(ic_env_t* env, editor_t* eb);
@@ -183,12 +188,13 @@ static bool edit_try_expand_abbreviation(ic_env_t* env, editor_t* eb, bool bound
 static void edit_refresh(ic_env_t* env, editor_t* eb);
 static void edit_refresh_hint(ic_env_t* env, editor_t* eb);
 static void redraw_prompt_prefix_lines(ic_env_t* env, editor_t* eb);
-static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb);
+static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb,
+                                    const char* rendered_hint);
 static bool edit_mouse_event_to_target_rowcol(ic_env_t* env, editor_t* eb,
                                               const tty_mouse_event_t* mouse_event,
                                               ssize_t* target_row, ssize_t* target_col);
 static void edit_toggle_mouse_reporting(ic_env_t* env, editor_t* eb);
-static void edit_reset_mouse_reporting_session(ic_env_t* env, editor_t* eb);
+static void edit_reset_mouse_reporting_session(ic_env_t* env, editor_t* eb, bool apply_default);
 
 static void edit_reset_last_arg_state(editor_t* eb) {
     if (eb == NULL) {
@@ -209,6 +215,9 @@ static bool key_action_execute(ic_env_t* env, editor_t* eb, ic_key_action_t acti
             return true;
         case IC_KEY_ACTION_HISTORY_SEARCH:
             edit_history_search_with_current_word(env, eb);
+            return true;
+        case IC_KEY_ACTION_COMMAND_PALETTE:
+            edit_command_palette(env, eb);
             return true;
         case IC_KEY_ACTION_HISTORY_PREV:
             edit_history_prev(env, eb);
@@ -377,6 +386,21 @@ static bool key_binding_execute(ic_env_t* env, editor_t* eb, code_t key) {
 //-------------------------------------------------------------
 static bool insert_initial_input(const char* initial_input,
                                  editor_t* eb);  // defined at bottom
+
+static void edit_set_rendered_hint_snapshot(editor_t* eb, const char* hint_text) {
+    if (eb == NULL || eb->mem == NULL) {
+        return;
+    }
+
+    if (eb->rendered_hint_snapshot != NULL) {
+        mem_free(eb->mem, eb->rendered_hint_snapshot);
+        eb->rendered_hint_snapshot = NULL;
+    }
+
+    if (hint_text != NULL && hint_text[0] != '\0') {
+        eb->rendered_hint_snapshot = mem_strdup(eb->mem, hint_text);
+    }
+}
 
 static char* edit_line(ic_env_t* env, const char* prompt_text,
                        const char* inline_right_text);  // defined at bottom
@@ -571,7 +595,18 @@ static bool edit_mouse_event_to_target_rowcol(ic_env_t* env, editor_t* eb,
 
     ssize_t cursor_row = 0;
     ssize_t cursor_col = 0;
-    if (!term_query_cursor_pos(env->term, &cursor_row, &cursor_col)) {
+    bool has_cursor_pos = term_query_cursor_pos(env->term, &cursor_row, &cursor_col);
+    if (has_cursor_pos) {
+        eb->last_screen_cursor_row = cursor_row;
+        eb->last_screen_cursor_col = cursor_col;
+        eb->last_screen_cursor_known = true;
+    } else if (eb->last_screen_cursor_known) {
+        cursor_row = eb->last_screen_cursor_row;
+        cursor_col = eb->last_screen_cursor_col;
+        has_cursor_pos = true;
+    }
+
+    if (!has_cursor_pos) {
         ssize_t fallback_row = mouse_event->row - 1;
         if (fallback_row < 0 || fallback_row >= eb->cur_rows) {
             return false;
@@ -614,7 +649,7 @@ static bool edit_mouse_event_to_target_rowcol(ic_env_t* env, editor_t* eb,
     return true;
 }
 
-static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb) {
+static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb, const char* rendered_hint) {
     if (env == NULL || eb == NULL || env->tty == NULL || env->term == NULL) {
         return false;
     }
@@ -624,8 +659,7 @@ static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb) {
         return false;
     }
 
-    if (mouse_event.action != TTY_MOUSE_ACTION_LEFT_PRESS &&
-        mouse_event.action != TTY_MOUSE_ACTION_LEFT_RELEASE) {
+    if (mouse_event.action != TTY_MOUSE_ACTION_LEFT_RELEASE) {
         return false;
     }
 
@@ -640,10 +674,40 @@ static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb) {
     ssize_t cpromptw = 0;
     edit_get_prompt_width(env, eb, false, &promptw, &cpromptw);
 
+    const char* active_hint = rendered_hint;
+    if ((active_hint == NULL || active_hint[0] == '\0') &&
+        eb->rendered_hint_snapshot != NULL && eb->rendered_hint_snapshot[0] != '\0') {
+        active_hint = eb->rendered_hint_snapshot;
+    }
+    if ((active_hint == NULL || active_hint[0] == '\0') && env->completions != NULL &&
+        completions_count(env->completions) > 0) {
+        active_hint = completions_get_hint(env->completions, 0, NULL);
+    }
+
+    stringbuf_t* display_input = eb->input;
+    stringbuf_t* display_input_with_hint = NULL;
+    ssize_t display_hint_len = 0;
+    const ssize_t display_hint_insert_pos = eb->pos;
+
+    if (active_hint != NULL && active_hint[0] != '\0') {
+        display_input_with_hint = sbuf_new(eb->mem);
+        if (display_input_with_hint != NULL) {
+            sbuf_replace(display_input_with_hint, sbuf_string(eb->input));
+            display_hint_len = ic_strlen(active_hint);
+            if (display_hint_len > 0) {
+                sbuf_insert_at(display_input_with_hint, active_hint, display_hint_insert_pos);
+                display_input = display_input_with_hint;
+            } else {
+                display_hint_len = 0;
+            }
+        }
+    }
+
     rowcol_t end_rc = {0};
-    ssize_t input_rows =
-        sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw, sbuf_len(eb->input), &end_rc);
+    ssize_t input_rows = sbuf_get_rc_at_pos(display_input, eb->termw, promptw, cpromptw,
+                                            sbuf_len(display_input), &end_rc);
     if (target_row >= input_rows) {
+        sbuf_free(display_input_with_hint);
         return false;
     }
 
@@ -654,10 +718,24 @@ static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb) {
     }
 
     ssize_t new_pos =
-        sbuf_get_pos_at_rc(eb->input, eb->termw, promptw, cpromptw, target_row, target_col);
+        sbuf_get_pos_at_rc(display_input, eb->termw, promptw, cpromptw, target_row, target_col);
     if (new_pos < 0) {
+        sbuf_free(display_input_with_hint);
         return false;
     }
+
+    if (display_input_with_hint != NULL && display_hint_len > 0) {
+        const ssize_t display_hint_end_pos = display_hint_insert_pos + display_hint_len;
+        if (new_pos > display_hint_insert_pos) {
+            if (new_pos < display_hint_end_pos) {
+                new_pos = display_hint_insert_pos;
+            } else {
+                new_pos -= display_hint_len;
+            }
+        }
+    }
+
+    sbuf_free(display_input_with_hint);
 
     if (new_pos != eb->pos) {
         eb->pos = new_pos;
@@ -1365,6 +1443,8 @@ static bool edit_current_line_is_empty(editor_t* eb) {
 
 static void edit_refresh(ic_env_t* env, editor_t* eb) {
     eb->replace_prompt_line_with_number = prompt_line_should_use_line_numbers(env, eb);
+    edit_set_rendered_hint_snapshot(
+        eb, (sbuf_len(eb->hint) > 0 ? sbuf_string(eb->hint) : NULL));
     // calculate the new cursor row and total rows needed
     ssize_t promptw, cpromptw;
     edit_get_prompt_width(env, eb, false, &promptw, &cpromptw);
@@ -2678,16 +2758,20 @@ static bool edit_format_default_status_hints(ic_env_t* env, char* buffer, size_t
 
     char completion_keys[EDIT_STATUS_HINT_KEYS_LEN];
     char history_search_keys[EDIT_STATUS_HINT_KEYS_LEN];
+    char command_palette_keys[EDIT_STATUS_HINT_KEYS_LEN];
     char help_keys[EDIT_STATUS_HINT_KEYS_LEN];
 
     format_binding_keys(env, IC_KEY_ACTION_COMPLETE, NULL, completion_keys, sizeof(completion_keys),
                         true);
     format_binding_keys(env, IC_KEY_ACTION_HISTORY_SEARCH, NULL, history_search_keys,
                         sizeof(history_search_keys), true);
+    format_binding_keys(env, IC_KEY_ACTION_COMMAND_PALETTE, NULL, command_palette_keys,
+                        sizeof(command_palette_keys), true);
     format_binding_keys(env, IC_KEY_ACTION_SHOW_HELP, NULL, help_keys, sizeof(help_keys), true);
 
-    int written = snprintf(buffer, buflen, "[ic-status]complete: %s  search: %s  help: %s[/]",
-                           completion_keys, history_search_keys, help_keys);
+    int written =
+        snprintf(buffer, buflen, "[ic-status]complete: %s  search: %s  palette: %s  help: %s[/]",
+                 completion_keys, history_search_keys, command_palette_keys, help_keys);
     if (written < 0) {
         buffer[0] = '\0';
         return false;
@@ -2768,7 +2852,7 @@ static void edit_toggle_mouse_reporting(ic_env_t* env, editor_t* eb) {
     edit_set_mouse_reporting_enabled(env, eb, !eb->mouse_reporting_enabled);
 }
 
-static void edit_reset_mouse_reporting_session(ic_env_t* env, editor_t* eb) {
+static void edit_reset_mouse_reporting_session(ic_env_t* env, editor_t* eb, bool apply_default) {
     if (eb == NULL) {
         return;
     }
@@ -2777,7 +2861,9 @@ static void edit_reset_mouse_reporting_session(ic_env_t* env, editor_t* eb) {
         tty_clear_last_mouse_event(env->tty);
     }
 
-    edit_set_mouse_reporting_enabled(env, eb, false);
+    const bool enable_mouse =
+        (apply_default && env != NULL && env->mouse_reporting_enabled_by_default);
+    edit_set_mouse_reporting_enabled(env, eb, enable_mouse);
 }
 
 static bool edit_enable_menu_mouse_scroll(ic_env_t* env) {
@@ -2799,6 +2885,12 @@ static void edit_disable_menu_mouse_scroll(ic_env_t* env, bool enabled) {
 //-------------------------------------------------------------
 
 #include "editline_history.c"
+
+//-------------------------------------------------------------
+// Command palette
+//-------------------------------------------------------------
+
+#include "editline_command_palette.c"
 
 //-------------------------------------------------------------
 // Completion
@@ -2927,7 +3019,7 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
     }
 
     if (!request_default && !has_custom_message && eb->mouse_reporting_enabled &&
-        mode != IC_STATUS_HINT_OFF) {
+        env->mouse_reporting_status_line_enabled && mode != IC_STATUS_HINT_OFF) {
         request_default = true;
     }
 
@@ -2962,7 +3054,7 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
         }
     }
 
-    if (eb->mouse_reporting_enabled) {
+    if (eb->mouse_reporting_enabled && env->mouse_reporting_status_line_enabled) {
         with_mouse_prefix = sbuf_new(eb->mem);
         if (with_mouse_prefix != NULL) {
             sbuf_append(with_mouse_prefix, "[ic-status]Mouse clicking is enabled[/]");
@@ -3029,6 +3121,7 @@ static void edit_release_editor(ic_env_t* env, editor_t* eb) {
     sbuf_free(eb->hint);
     sbuf_free(eb->hint_help);
     sbuf_free(eb->history_prefix);
+    mem_free(env->mem, eb->rendered_hint_snapshot);
     mem_free(env->mem, (void*)eb->prompt_text);
     mem_free(env->mem, eb->prompt_prefix_text);
 }
@@ -3131,7 +3224,7 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
 
     // Set this editor as the current active editor
     env->current_editor = &eb;
-    edit_reset_mouse_reporting_session(env, &eb);
+    edit_reset_mouse_reporting_session(env, &eb, true);
 
     // Insert initial input if present
     bool seeded_multiline_lines = false;
@@ -3295,19 +3388,27 @@ edit_loop_entry:
                 }
             }
 
-            if (pending_hint != NULL) {
-                mem_free(eb.mem, pending_hint);
-                pending_hint = NULL;
-            }
-
             if ((c < IC_KEY_EVENT_BASE || c >= IC_KEY_UNICODE_MAX) &&
                 key_binding_execute(env, &eb, c)) {
+                if (pending_hint != NULL) {
+                    mem_free(eb.mem, pending_hint);
+                    pending_hint = NULL;
+                }
                 continue;
             }
 
             if (eb.mouse_reporting_enabled && KEY_NO_MODS(c) == KEY_EVENT_MOUSE_OTHER &&
-                edit_handle_mouse_click(env, &eb)) {
+                edit_handle_mouse_click(env, &eb, pending_hint)) {
+                if (pending_hint != NULL) {
+                    mem_free(eb.mem, pending_hint);
+                    pending_hint = NULL;
+                }
                 continue;
+            }
+
+            if (pending_hint != NULL) {
+                mem_free(eb.mem, pending_hint);
+                pending_hint = NULL;
             }
 
             // Operations that may return
@@ -3384,6 +3485,10 @@ edit_loop_entry:
                     case KEY_CTRL_R:
                     case KEY_CTRL_S:
                         edit_history_search_with_current_word(env, &eb);
+                        break;
+                    case WITH_ALT('p'):
+                    case WITH_ALT('P'):
+                        edit_command_palette(env, &eb);
                         break;
                     case KEY_CTRL_P:
                         edit_history_prev(env, &eb);
@@ -3598,8 +3703,8 @@ edit_loop_entry:
     if (ctrl_d_pressed || (c == KEY_CTRL_D && sbuf_len(eb.input) == 0)) {
         env->last_readline_disposition = IC_READLINE_DISPOSITION_EOF;
     } else if (ctrl_c_pressed || c == KEY_CTRL_C) {
-        env->last_readline_disposition =
-            (stop_event_received ? IC_READLINE_DISPOSITION_STOP : IC_READLINE_DISPOSITION_INTERRUPT);
+        env->last_readline_disposition = (stop_event_received ? IC_READLINE_DISPOSITION_STOP
+                                                              : IC_READLINE_DISPOSITION_INTERRUPT);
     } else if (c == KEY_EVENT_STOP) {
         env->last_readline_disposition = IC_READLINE_DISPOSITION_STOP;
     } else if (res == NULL) {
@@ -3618,7 +3723,7 @@ edit_loop_entry:
         ic_history_remove_last();
     }
 
-    edit_reset_mouse_reporting_session(env, &eb);
+    edit_reset_mouse_reporting_session(env, &eb, false);
 
     // Clear the current editor pointer
     env->current_editor = NULL;

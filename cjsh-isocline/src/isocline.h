@@ -139,8 +139,7 @@ char* ic_readline(const char* prompt_text, const char* inline_right_text,
 /// @param initial_input Same as ic_readline().
 /// @returns A structured result. If `result.input` is non-NULL it must be
 ///          released with ic_free().
-ic_readline_result_t ic_readline_with_status(const char* prompt_text,
-                                             const char* inline_right_text,
+ic_readline_result_t ic_readline_with_status(const char* prompt_text, const char* inline_right_text,
                                              const char* initial_input);
 
 /// Convert an ic_readline_disposition_t into a stable lowercase string.
@@ -631,6 +630,12 @@ bool ic_enable_auto_tab(bool enable);
 /// Returns the previous setting.
 bool ic_enable_completion_preview(bool enable);
 
+/// Configure whether completion menus open in expanded mode by default (disabled by default).
+/// When enabled, the first completion menu view uses the full single-column layout without
+/// requiring PgDn/ctrl-j to expand.
+/// Returns the previous setting.
+bool ic_enable_completion_menu_start_expanded(bool enable);
+
 /// Disable or enable automatic identation of continuation lines in multiline
 /// input so it aligns with the initial prompt. (enabled by default)
 /// Returns the previous setting.
@@ -747,6 +752,16 @@ bool ic_enable_inline_right_prompt_cursor_follow(bool enable);
 
 /// Returns whether the right-aligned prompt follows the cursor height.
 bool ic_inline_right_prompt_follows_cursor(void);
+
+/// Enable or disable mouse click reporting by default for new readline sessions.
+/// When enabled, mouse clicking support starts in the same state as if the user pressed the
+/// toggle-mouse keybinding at prompt startup. Returns the previous setting.
+bool ic_enable_mouse_clicking(bool enable);
+
+/// Enable or disable the status-line indicator that says mouse clicking is enabled.
+/// Disabling this hides the indicator text but does not disable mouse clicking support itself.
+/// Returns the previous setting.
+bool ic_enable_mouse_reporting_status_line(bool enable);
 
 /// Disable or enable hinting (enabled by default)
 /// Shows a hint inline when there is a single possible completion.
@@ -884,6 +899,45 @@ size_t ic_list_key_binding_profiles(ic_key_binding_profile_info_t* buffer, size_
 /// @param action The key action to query.
 /// @returns A string containing the default key specs, or NULL if none exist.
 const char* ic_key_binding_profile_default_specs(ic_key_action_t action);
+
+/// Custom command palette entry metadata.
+/// These entries are shown alongside built-in editing actions when the command
+/// palette opens.
+typedef struct ic_command_palette_entry_s {
+    /// Stable identifier passed back to the handler callback.
+    const char* id;
+    /// Display name shown in the command palette list.
+    const char* name;
+    /// One-line description shown next to the name.
+    const char* description;
+    /// Extra searchable terms to improve natural-language matching.
+    const char* keywords;
+} ic_command_palette_entry_t;
+
+/// Callback invoked when a custom command palette entry is selected.
+/// Return `true` if the entry was handled successfully.
+/// Inside this callback you can use editor APIs such as ic_set_buffer(),
+/// ic_set_cursor_pos(), and ic_request_submit() to apply snippets or trigger
+/// workflow actions.
+typedef bool(ic_command_palette_entry_handler_t)(const ic_command_palette_entry_t* entry,
+                                                 void* arg);
+
+/// Replace all registered custom command palette entries.
+/// Passing `entries == NULL` and `count == 0` clears all custom entries.
+/// Returns `false` on invalid input or allocation failure.
+bool ic_set_command_palette_entries(const ic_command_palette_entry_t* entries, size_t count);
+
+/// Clear all registered custom command palette entries.
+void ic_clear_command_palette_entries(void);
+
+/// List currently registered custom command palette entries.
+/// If `buffer` is NULL or `capacity` is 0, returns the number of entries.
+/// Otherwise writes up to `capacity` entries and returns the number written.
+size_t ic_list_command_palette_entries(ic_command_palette_entry_t* buffer, size_t capacity);
+
+/// Set the callback that executes custom command palette entries.
+/// Pass NULL to disable custom entry execution.
+void ic_set_command_palette_entry_handler(ic_command_palette_entry_handler_t* handler, void* arg);
 
 /// \}
 

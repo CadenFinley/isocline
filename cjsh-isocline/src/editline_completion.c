@@ -146,6 +146,12 @@ static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, s
 
     const char* arrow = (tty_is_utf8(env->tty) ? "\xE2\x86\x92" : ">");
     ssize_t width_remaining = width;
+    const char* source_style = (selected ? "ic-menu-selected-secondary" : "ic-source");
+    const char* help_style = (selected ? "ic-menu-selected-secondary" : "ic-info");
+
+    if (selected) {
+        sbuf_append(eb->extra, "[ic-menu-selected]");
+    }
 
     if (numbered) {
         ssize_t shown = 1 + idx;
@@ -155,41 +161,21 @@ static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, s
         }
         ssize_t prefix_width = 1 + ndigits + 1;
         width_remaining -= prefix_width;
-        if (selected) {
-            sbuf_append(eb->extra, "[ic-emphasis]");
-        }
         sbuf_appendf(eb->extra, "%s%zd ", (selected ? arrow : " "), shown);
-        if (selected) {
-            sbuf_append(eb->extra, "[/ic-emphasis]");
-        } else {
-            sbuf_append(eb->extra, "[ic-info][/]");
-        }
     } else {
-        ssize_t prefix_width = 2;  // arrow + space (or two spaces when not selected)
+        ssize_t prefix_width = 2;
         width_remaining -= prefix_width;
-        if (selected) {
-            sbuf_append(eb->extra, "[ic-emphasis]");
-            sbuf_appendf(eb->extra, "%s ", arrow);
-            sbuf_append(eb->extra, "[/ic-emphasis]");
-        } else {
-            sbuf_append(eb->extra, "  ");
-        }
+        sbuf_appendf(eb->extra, "%s ", (selected ? arrow : " "));
     }
 
     bool apply_width_constraint = (width_remaining > 0) && (numbered || !selected);
     if (apply_width_constraint) {
         sbuf_appendf(eb->extra, "[width=\"%zd;left; ;on\"]", width_remaining);
     }
-    if (selected) {
-        sbuf_append(eb->extra, "[ic-emphasis]");
-    }
     char* single_line_alloc = NULL;
     const char* single_line_display =
         completion_single_line_view(env->mem, display, &single_line_alloc);
     sbuf_append(eb->extra, single_line_display);
-    if (selected) {
-        sbuf_append(eb->extra, "[/ic-emphasis]");
-    }
     if (single_line_alloc != NULL) {
         mem_free(env->mem, single_line_alloc);
     }
@@ -205,17 +191,20 @@ static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, s
     }
     if (source_display != NULL) {
         sbuf_append(eb->extra, " ");
-        sbuf_append_tagged(eb->extra, "ic-source", "(");
-        sbuf_append_tagged(eb->extra, "ic-source", source_display);
-        sbuf_append_tagged(eb->extra, "ic-source", ")");
+        sbuf_append_tagged(eb->extra, source_style, "(");
+        sbuf_append_tagged(eb->extra, source_style, source_display);
+        sbuf_append_tagged(eb->extra, source_style, ")");
     }
 
     if (help != NULL) {
         sbuf_append(eb->extra, "  ");
-        sbuf_append_tagged(eb->extra, "ic-info", help);
+        sbuf_append_tagged(eb->extra, help_style, help);
     }
     if (apply_width_constraint) {
         sbuf_append(eb->extra, "[/width]");
+    }
+    if (selected) {
+        sbuf_append(eb->extra, "[/ic-menu-selected]");
     }
     if (source_alloc != NULL) {
         mem_free(env->mem, source_alloc);
@@ -502,7 +491,7 @@ static void edit_completion_menu(ic_env_t* env, editor_t* eb, bool more_availabl
     sbuf_clear(eb->hint_help);
     edit_completion_menu_update_hint(env, eb, false);
     ssize_t selected = (env->complete_nopreview ? 0 : -1);
-    bool expanded_mode = false;
+    bool expanded_mode = env->complete_menu_start_expanded;
     ssize_t scroll_offset = 0;
     ssize_t last_rows_visible = 0;
     ssize_t last_max_scroll_offset = 0;
@@ -810,13 +799,11 @@ again:
 
         const bool menu_mouse_click_enabled =
             (expanded_mode ? menu_mouse_scroll_enabled : eb->mouse_reporting_enabled);
-        const char* mouse_suffix =
-            (menu_mouse_click_enabled ? " (Mouse clicking is enabled)" : "");
+        const char* mouse_suffix = (menu_mouse_click_enabled ? " (Mouse clicking is enabled)" : "");
 
         if (visible_start > 0 && visible_end >= visible_start) {
-            snprintf(header, sizeof(header),
-                     "[ic-info]Showing %zd-%zd of %zd completions%s%s[/]\n", visible_start,
-                     visible_end, count, hint_suffix, mouse_suffix);
+            snprintf(header, sizeof(header), "[ic-info]Showing %zd-%zd of %zd completions%s%s[/]\n",
+                     visible_start, visible_end, count, hint_suffix, mouse_suffix);
         } else {
             snprintf(header, sizeof(header), "[ic-info]Showing %zd of %zd completions%s%s[/]\n",
                      (visible_count > 0 ? visible_count : count_displayed), count, hint_suffix,
@@ -1072,8 +1059,8 @@ read_key:
     } else {
         ic_key_action_t action = IC_KEY_ACTION__MAX;
         bool has_override = key_binding_lookup_action(env, c, &action);
-        bool toggle_mouse_key = (has_override ? (action == IC_KEY_ACTION_TOGGLE_MOUSE_REPORTING)
-                                              : (c == KEY_F2));
+        bool toggle_mouse_key =
+            (has_override ? (action == IC_KEY_ACTION_TOGGLE_MOUSE_REPORTING) : (c == KEY_F2));
         if (toggle_mouse_key) {
             edit_toggle_mouse_reporting(env, eb);
             if (expanded_mode) {

@@ -71,6 +71,26 @@ static bool ic_env_ensure_abbreviation_capacity(ic_env_t* env, ssize_t needed) {
     return true;
 }
 
+static void ic_env_clear_command_palette_entries(ic_env_t* env) {
+    if (env == NULL || env->command_palette_entries == NULL) {
+        if (env != NULL) {
+            env->command_palette_entry_count = 0;
+        }
+        return;
+    }
+
+    for (ssize_t i = 0; i < env->command_palette_entry_count; ++i) {
+        mem_free(env->mem, env->command_palette_entries[i].id);
+        mem_free(env->mem, env->command_palette_entries[i].name);
+        mem_free(env->mem, env->command_palette_entries[i].description);
+        mem_free(env->mem, env->command_palette_entries[i].keywords);
+    }
+
+    mem_free(env->mem, env->command_palette_entries);
+    env->command_palette_entries = NULL;
+    env->command_palette_entry_count = 0;
+}
+
 ic_public const char* ic_get_prompt_marker(void) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -208,6 +228,15 @@ ic_public bool ic_enable_completion_preview(bool enable) {
     bool prev = env->complete_nopreview;
     env->complete_nopreview = !enable;
     return !prev;
+}
+
+ic_public bool ic_enable_completion_menu_start_expanded(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->complete_menu_start_expanded;
+    env->complete_menu_start_expanded = enable;
+    return prev;
 }
 
 ic_public bool ic_enable_multiline_indent(bool enable) {
@@ -445,6 +474,24 @@ ic_public ic_status_hint_mode_t ic_get_status_hint_mode(void) {
     return env->status_hint_mode;
 }
 
+ic_public bool ic_enable_mouse_clicking(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->mouse_reporting_enabled_by_default;
+    env->mouse_reporting_enabled_by_default = enable;
+    return prev;
+}
+
+ic_public bool ic_enable_mouse_reporting_status_line(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->mouse_reporting_status_line_enabled;
+    env->mouse_reporting_status_line_enabled = enable;
+    return prev;
+}
+
 ic_public bool ic_enable_prompt_cleanup(bool enable, size_t extra_lines) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -669,6 +716,120 @@ ic_public void ic_clear_abbreviations(void) {
     env->abbreviations = NULL;
     env->abbreviation_count = 0;
     env->abbreviation_capacity = 0;
+}
+
+ic_public bool ic_set_command_palette_entries(const ic_command_palette_entry_t* entries,
+                                              size_t count) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL) {
+        return false;
+    }
+
+    if (count == 0) {
+        ic_env_clear_command_palette_entries(env);
+        return true;
+    }
+
+    if (entries == NULL) {
+        return false;
+    }
+
+    const ssize_t ssize_count = to_ssize_t(count);
+    if (ssize_count <= 0) {
+        return false;
+    }
+
+    ic_command_palette_entry_internal_t* copied =
+        mem_zalloc_tp_n(env->mem, ic_command_palette_entry_internal_t, ssize_count);
+    if (copied == NULL) {
+        return false;
+    }
+
+    for (ssize_t i = 0; i < ssize_count; ++i) {
+        const ic_command_palette_entry_t* source = &entries[i];
+        const char* source_name = source->name;
+        if (source_name == NULL || source_name[0] == '\0') {
+            for (ssize_t j = 0; j <= i; ++j) {
+                mem_free(env->mem, copied[j].id);
+                mem_free(env->mem, copied[j].name);
+                mem_free(env->mem, copied[j].description);
+                mem_free(env->mem, copied[j].keywords);
+            }
+            mem_free(env->mem, copied);
+            return false;
+        }
+
+        const char* source_id = source->id;
+        if (source_id == NULL || source_id[0] == '\0') {
+            source_id = source_name;
+        }
+        const char* source_description = (source->description != NULL ? source->description : "");
+        const char* source_keywords = (source->keywords != NULL ? source->keywords : "");
+
+        copied[i].id = mem_strdup(env->mem, source_id);
+        copied[i].name = mem_strdup(env->mem, source_name);
+        copied[i].description = mem_strdup(env->mem, source_description);
+        copied[i].keywords = mem_strdup(env->mem, source_keywords);
+
+        if (copied[i].id == NULL || copied[i].name == NULL || copied[i].description == NULL ||
+            copied[i].keywords == NULL) {
+            for (ssize_t j = 0; j <= i; ++j) {
+                mem_free(env->mem, copied[j].id);
+                mem_free(env->mem, copied[j].name);
+                mem_free(env->mem, copied[j].description);
+                mem_free(env->mem, copied[j].keywords);
+            }
+            mem_free(env->mem, copied);
+            return false;
+        }
+    }
+
+    ic_env_clear_command_palette_entries(env);
+    env->command_palette_entries = copied;
+    env->command_palette_entry_count = ssize_count;
+    return true;
+}
+
+ic_public void ic_clear_command_palette_entries(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL) {
+        return;
+    }
+    ic_env_clear_command_palette_entries(env);
+}
+
+ic_public size_t ic_list_command_palette_entries(ic_command_palette_entry_t* buffer,
+                                                 size_t capacity) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL || env->command_palette_entry_count <= 0 ||
+        env->command_palette_entries == NULL) {
+        return 0;
+    }
+
+    size_t count = to_size_t(env->command_palette_entry_count);
+    if (buffer == NULL || capacity == 0) {
+        return count;
+    }
+
+    size_t limit = (count < capacity ? count : capacity);
+    for (size_t i = 0; i < limit; ++i) {
+        const ic_command_palette_entry_internal_t* src = &env->command_palette_entries[i];
+        buffer[i].id = src->id;
+        buffer[i].name = src->name;
+        buffer[i].description = src->description;
+        buffer[i].keywords = src->keywords;
+    }
+    return limit;
+}
+
+ic_public void ic_set_command_palette_entry_handler(ic_command_palette_entry_handler_t* handler,
+                                                    void* arg) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL) {
+        return;
+    }
+    env->command_palette_handler = handler;
+    env->command_palette_handler_arg = arg;
 }
 
 ic_public void ic_set_default_highlighter(ic_highlight_fun_t* highlighter, void* arg) {

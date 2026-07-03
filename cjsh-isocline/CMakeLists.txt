@@ -56,15 +56,9 @@ file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
 )
 
-set(CJSH_ISOCLINE_INCLUDE_DIRS "")
-foreach(header_path IN LISTS CJSH_ISOCLINE_HEADERS)
-    get_filename_component(header_dir "${header_path}" DIRECTORY)
-    list(APPEND CJSH_ISOCLINE_INCLUDE_DIRS "${header_dir}")
-endforeach()
-list(APPEND CJSH_ISOCLINE_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src")
-list(REMOVE_DUPLICATES CJSH_ISOCLINE_INCLUDE_DIRS)
+cjsh_collect_include_dirs(ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src" OUT_VAR CJSH_ISOCLINE_INCLUDE_DIRS)
 
-set(CJSH_ISOCLINE_COMPAT_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/include")
+set(CJSH_ISOCLINE_COMPAT_INCLUDE_DIR "${CMAKE_BINARY_DIR}/generated/include")
 file(MAKE_DIRECTORY "${CJSH_ISOCLINE_COMPAT_INCLUDE_DIR}/isocline")
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/isocline.h"
@@ -72,10 +66,7 @@ configure_file(
     COPYONLY
 )
 
-find_package(Threads REQUIRED)
-
 add_library(cjsh_isocline STATIC)
-add_library(isocline::isocline ALIAS cjsh_isocline)
 target_sources(cjsh_isocline PRIVATE ${CJSH_ISOCLINE_SOURCES} ${CJSH_ISOCLINE_HEADERS})
 target_include_directories(
     cjsh_isocline
@@ -83,15 +74,11 @@ target_include_directories(
         ${CJSH_ISOCLINE_INCLUDE_DIRS}
         ${CJSH_ISOCLINE_COMPAT_INCLUDE_DIR}
 )
-target_link_libraries(cjsh_isocline PUBLIC Threads::Threads)
-if(TARGET cjsh_build_settings)
-    target_link_libraries(cjsh_isocline PUBLIC cjsh_build_settings)
-endif()
+target_link_libraries(cjsh_isocline PUBLIC cjsh_build_settings Threads::Threads)
 target_compile_definitions(cjsh_isocline PUBLIC IC_SEPARATE_OBJS=1)
 set_target_properties(
     cjsh_isocline
     PROPERTIES
-        OUTPUT_NAME isocline
         C_STANDARD 11
         C_STANDARD_REQUIRED YES
         C_EXTENSIONS NO
