@@ -222,6 +222,24 @@ ic_status_hint_mode_t ic_set_status_hint_mode(ic_status_hint_mode_t mode);
 /// Get the current status hint rendering mode.
 ic_status_hint_mode_t ic_get_status_hint_mode(void);
 
+/// Mouse capture behavior for readline sessions.
+/// - `IC_MOUSE_CLICKING_DISABLED`: never capture mouse events.
+/// - `IC_MOUSE_CLICKING_SIMPLE`: start with mouse capture enabled; only manual toggle changes it.
+/// - `IC_MOUSE_CLICKING_SMART`: start enabled and auto-suspend on wheel/viewport-exit input,
+///   then auto-resume on keyboard/focus-in input.
+typedef enum ic_mouse_clicking_mode_e {
+    IC_MOUSE_CLICKING_DISABLED = 0,
+    IC_MOUSE_CLICKING_SIMPLE,
+    IC_MOUSE_CLICKING_SMART,
+} ic_mouse_clicking_mode_t;
+
+/// Set mouse capture mode. Invalid values normalize to `IC_MOUSE_CLICKING_SMART`.
+/// Returns the previous mode.
+ic_mouse_clicking_mode_t ic_set_mouse_clicking_mode(ic_mouse_clicking_mode_t mode);
+
+/// Get the configured mouse capture mode.
+ic_mouse_clicking_mode_t ic_get_mouse_clicking_mode(void);
+
 /// Queue multiple key events so they are processed before the next read.
 /// Returns `false` if the readline environment is not yet initialized.
 bool ic_push_key_sequence(const ic_keycode_t* keys, size_t count);
@@ -636,6 +654,13 @@ bool ic_enable_completion_preview(bool enable);
 /// Returns the previous setting.
 bool ic_enable_completion_menu_start_expanded(bool enable);
 
+/// Enable or disable click-to-accept for completion candidates (disabled by default).
+/// Returns the previous setting.
+bool ic_enable_completion_click_accept(bool enable);
+
+/// Returns whether click-to-accept for completion candidates is currently enabled.
+bool ic_completion_click_accept_is_enabled(void);
+
 /// Disable or enable automatic identation of continuation lines in multiline
 /// input so it aligns with the initial prompt. (enabled by default)
 /// Returns the previous setting.
@@ -718,33 +743,6 @@ const char* ic_get_whitespace_marker(void);
 /// @returns the previous setting.
 bool ic_enable_inline_help(bool enable);
 
-/// Enable or disable prompt cleanup after accepting input.
-/// When enabled, accepting a line removes the prompt and rewrites just the
-/// trailing prompt segment next to the submitted input. The optional
-/// \p extra_lines parameter specifies how many additional terminal lines
-/// beyond the prompt should be cleared while rewriting (defaults to 0).
-/// Returns the previous setting.
-bool ic_enable_prompt_cleanup(bool enable, size_t extra_lines
-#ifdef __cplusplus
-                                           = 0
-#endif
-);
-bool ic_prompt_cleanup_is_enabled(void);
-size_t ic_prompt_cleanup_extra_lines(void);
-bool ic_enable_prompt_cleanup_newline(bool enable);
-bool ic_prompt_cleanup_newline_is_enabled(void);
-
-/// Enable or disable inserting an empty line after prompt cleanup output.
-/// Returns the previous setting.
-bool ic_enable_prompt_cleanup_empty_line(bool enable);
-bool ic_prompt_cleanup_empty_line_is_enabled(void);
-
-/// Enable or disable multiline truncation during prompt cleanup.
-/// When enabled, multiline submissions are collapsed to the first line followed by an ellipsis.
-/// Returns the previous setting.
-bool ic_enable_prompt_cleanup_truncate_multiline(bool enable);
-bool ic_prompt_cleanup_truncate_multiline_is_enabled(void);
-
 /// Enable or disable cursor-tracking for the inline right prompt (RPS1).
 /// When enabled, the right-aligned prompt is re-rendered on the same terminal row as the cursor
 /// instead of remaining pinned to the first editable row. Returns the previous setting.
@@ -753,9 +751,10 @@ bool ic_enable_inline_right_prompt_cursor_follow(bool enable);
 /// Returns whether the right-aligned prompt follows the cursor height.
 bool ic_inline_right_prompt_follows_cursor(void);
 
-/// Enable or disable mouse click reporting by default for new readline sessions.
-/// When enabled, mouse clicking support starts in the same state as if the user pressed the
-/// toggle-mouse keybinding at prompt startup. Returns the previous setting.
+/// Legacy compatibility helper for older callers.
+/// `true` enables per-prompt mouse capture defaults (equivalent to SIMPLE mode startup behavior);
+/// `false` disables startup capture while preserving the current mode.
+/// Returns the previous startup-default setting.
 bool ic_enable_mouse_clicking(bool enable);
 
 /// Enable or disable the status-line indicator that says mouse clicking is enabled.
@@ -773,6 +772,12 @@ bool ic_enable_hint(bool enable);
 /// current token to the closest available completion.
 /// @returns the previous setting.
 bool ic_enable_spell_correct(bool enable);
+
+/// Disable or enable spell correction when submitting with Enter (disabled by default).
+/// When enabled, pressing Enter applies a single available spell correction suggestion
+/// before accepting the line.
+/// @returns the previous setting.
+bool ic_enable_spell_correct_on_enter(bool enable);
 
 /// Set millisecond delay before a hint is displayed. Can be zero. (0ms by
 /// default).

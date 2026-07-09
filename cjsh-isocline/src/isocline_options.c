@@ -239,6 +239,23 @@ ic_public bool ic_enable_completion_menu_start_expanded(bool enable) {
     return prev;
 }
 
+ic_public bool ic_enable_completion_click_accept(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+
+    bool prev = env->completion_click_accept_enabled;
+    env->completion_click_accept_enabled = enable;
+    return prev;
+}
+
+ic_public bool ic_completion_click_accept_is_enabled(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    return env->completion_click_accept_enabled;
+}
+
 ic_public bool ic_enable_multiline_indent(bool enable) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -405,6 +422,15 @@ ic_public bool ic_enable_spell_correct(bool enable) {
     return prev;
 }
 
+ic_public bool ic_enable_spell_correct_on_enter(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->spell_correct_on_enter;
+    env->spell_correct_on_enter = enable;
+    return prev;
+}
+
 ic_public long ic_set_hint_delay(long delay_ms) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -474,12 +500,45 @@ ic_public ic_status_hint_mode_t ic_get_status_hint_mode(void) {
     return env->status_hint_mode;
 }
 
+static ic_mouse_clicking_mode_t ic_normalize_mouse_clicking_mode(ic_mouse_clicking_mode_t mode) {
+    switch (mode) {
+        case IC_MOUSE_CLICKING_DISABLED:
+        case IC_MOUSE_CLICKING_SIMPLE:
+        case IC_MOUSE_CLICKING_SMART:
+            return mode;
+        default:
+            return IC_MOUSE_CLICKING_SMART;
+    }
+}
+
+ic_public ic_mouse_clicking_mode_t ic_set_mouse_clicking_mode(ic_mouse_clicking_mode_t mode) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return IC_MOUSE_CLICKING_DISABLED;
+
+    ic_mouse_clicking_mode_t prev = env->mouse_reporting_mode;
+    env->mouse_reporting_mode = ic_normalize_mouse_clicking_mode(mode);
+    env->mouse_reporting_enabled_by_default =
+        (env->mouse_reporting_mode != IC_MOUSE_CLICKING_DISABLED);
+    return prev;
+}
+
+ic_public ic_mouse_clicking_mode_t ic_get_mouse_clicking_mode(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return IC_MOUSE_CLICKING_DISABLED;
+    return ic_normalize_mouse_clicking_mode(env->mouse_reporting_mode);
+}
+
 ic_public bool ic_enable_mouse_clicking(bool enable) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
         return false;
     bool prev = env->mouse_reporting_enabled_by_default;
     env->mouse_reporting_enabled_by_default = enable;
+    if (enable && env->mouse_reporting_mode == IC_MOUSE_CLICKING_DISABLED) {
+        env->mouse_reporting_mode = IC_MOUSE_CLICKING_SIMPLE;
+    }
     return prev;
 }
 
@@ -490,78 +549,6 @@ ic_public bool ic_enable_mouse_reporting_status_line(bool enable) {
     bool prev = env->mouse_reporting_status_line_enabled;
     env->mouse_reporting_status_line_enabled = enable;
     return prev;
-}
-
-ic_public bool ic_enable_prompt_cleanup(bool enable, size_t extra_lines) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return false;
-    bool prev = env->prompt_cleanup;
-    env->prompt_cleanup = enable;
-    env->prompt_cleanup_extra_lines = extra_lines;
-    return prev;
-}
-
-ic_public bool ic_prompt_cleanup_is_enabled(void) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return false;
-    return env->prompt_cleanup;
-}
-
-ic_public size_t ic_prompt_cleanup_extra_lines(void) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return 0;
-    return env->prompt_cleanup_extra_lines;
-}
-
-ic_public bool ic_enable_prompt_cleanup_newline(bool enable) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return false;
-    bool prev = env->prompt_cleanup_newline_after_execution;
-    env->prompt_cleanup_newline_after_execution = enable;
-    return prev;
-}
-
-ic_public bool ic_prompt_cleanup_newline_is_enabled(void) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return false;
-    return env->prompt_cleanup_newline_after_execution;
-}
-
-ic_public bool ic_enable_prompt_cleanup_empty_line(bool enable) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return false;
-    bool prev = env->prompt_cleanup_add_empty_line;
-    env->prompt_cleanup_add_empty_line = enable;
-    return prev;
-}
-
-ic_public bool ic_prompt_cleanup_empty_line_is_enabled(void) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return false;
-    return env->prompt_cleanup_add_empty_line;
-}
-
-ic_public bool ic_enable_prompt_cleanup_truncate_multiline(bool enable) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return false;
-    bool prev = env->prompt_cleanup_truncate_multiline;
-    env->prompt_cleanup_truncate_multiline = enable;
-    return prev;
-}
-
-ic_public bool ic_prompt_cleanup_truncate_multiline_is_enabled(void) {
-    ic_env_t* env = ic_get_env();
-    if (env == NULL)
-        return false;
-    return env->prompt_cleanup_truncate_multiline;
 }
 
 ic_public bool ic_enable_inline_right_prompt_cursor_follow(bool enable) {

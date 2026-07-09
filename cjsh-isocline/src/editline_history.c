@@ -132,13 +132,87 @@ static bool history_search_has_valid_metadata_tag(const char* query) {
     return false;
 }
 
+static const char* k_history_search_timestamp_key = "timestamp";
+static const char* k_history_search_exit_code_key = "code";
+static const char* k_history_search_exit_code_legacy_key = "exit_code";
+
+static const char* history_search_entry_exit_code(const history_entry_t* entry) {
+    if (entry == NULL) {
+        return NULL;
+    }
+
+    const char* exit_code = history_entry_get_metadata(entry, k_history_search_exit_code_key);
+    if (exit_code == NULL || exit_code[0] == '\0') {
+        exit_code = history_entry_get_metadata(entry, k_history_search_exit_code_legacy_key);
+    }
+
+    if (exit_code == NULL || exit_code[0] == '\0') {
+        return NULL;
+    }
+    return exit_code;
+}
+
+static bool history_search_format_relative_time(time_t timestamp, char* formatted_buf,
+                                                size_t formatted_buf_size) {
+    if (formatted_buf == NULL || formatted_buf_size == 0) {
+        return false;
+    }
+
+    time_t now = time(NULL);
+    if (now == (time_t)-1) {
+        return false;
+    }
+
+    long long now_ll = (long long)now;
+    long long ts_ll = (long long)timestamp;
+    bool in_future = (ts_ll > now_ll);
+    unsigned long long delta_seconds =
+        (unsigned long long)(in_future ? (ts_ll - now_ll) : (now_ll - ts_ll));
+
+    if (delta_seconds < 5ULL) {
+        int n = snprintf(formatted_buf, formatted_buf_size, "%s",
+                         in_future ? "in a moment" : "just now");
+        return (n > 0 && (size_t)n < formatted_buf_size);
+    }
+
+    unsigned long long amount = delta_seconds;
+    const char* unit = "s";
+
+    if (delta_seconds >= 31557600ULL) {
+        amount = delta_seconds / 31557600ULL;
+        unit = "y";
+    } else if (delta_seconds >= 2629800ULL) {
+        amount = delta_seconds / 2629800ULL;
+        unit = "mo";
+    } else if (delta_seconds >= 604800ULL) {
+        amount = delta_seconds / 604800ULL;
+        unit = "w";
+    } else if (delta_seconds >= 86400ULL) {
+        amount = delta_seconds / 86400ULL;
+        unit = "d";
+    } else if (delta_seconds >= 3600ULL) {
+        amount = delta_seconds / 3600ULL;
+        unit = "h";
+    } else if (delta_seconds >= 60ULL) {
+        amount = delta_seconds / 60ULL;
+        unit = "m";
+    }
+
+    int n = snprintf(formatted_buf, formatted_buf_size, in_future ? "in %llu%s" : "%llu%s ago",
+                     amount, unit);
+    return (n > 0 && (size_t)n < formatted_buf_size);
+}
+
 static const char* history_search_pretty_metadata_value(const char* key, const char* value,
                                                         char* formatted_buf,
                                                         size_t formatted_buf_size) {
     if (value == NULL || value[0] == '\0') {
         return "-";
     }
-    ic_unused(key);
+
+    if (key == NULL || ic_stricmp(key, k_history_search_timestamp_key) != 0) {
+        return value;
+    }
 
     char* end = NULL;
     long long epoch = strtoll(value, &end, 10);
@@ -156,17 +230,7 @@ static const char* history_search_pretty_metadata_value(const char* key, const c
         return value;
     }
 
-    struct tm local_tm;
-    if (localtime_r(&ts, &local_tm) == NULL) {
-        return value;
-    }
-
-    if (formatted_buf == NULL || formatted_buf_size == 0) {
-        return value;
-    }
-
-    size_t written = strftime(formatted_buf, formatted_buf_size, "%Y-%m-%d %H:%M:%S", &local_tm);
-    if (written == 0) {
+    if (!history_search_format_relative_time(ts, formatted_buf, formatted_buf_size)) {
         return value;
     }
 
@@ -515,6 +579,66 @@ static const char* get_first_line_end(const char* str) {
     return p;
 }
 
+static bool history_menu_contains_line_break(const char* str) {
+    if (str == NULL) {
+        return false;
+    }
+    return (strchr(str, '\n') != NULL || strchr(str, '\r') != NULL);
+}
+
+static ssize_t history_menu_line_count(const char* str) {
+    if (str == NULL || *str == '\0') {
+        return 1;
+    }
+
+    ssize_t lines = 1;
+    for (const char* p = str; *p != '\0'; ++p) {
+        if (*p == '\n') {
+            lines++;
+        } else if (*p == '\r') {
+            lines++;
+            if (p[1] == '\n') {
+                ++p;
+            }
+        }
+    }
+    return lines;
+}
+
+static void history_menu_append_multiline_preview(ic_env_t* env, editor_t* eb,
+                                                  const char* command) {
+    if (env == NULL || eb == NULL || command == NULL) {
+        return;
+    }
+
+    const char* arrow = (tty_is_utf8(env->tty) ? "\xE2\x86\x92" : ">");
+    sbuf_append(eb->extra, "[ic-menu-selected][!pre]");
+    sbuf_appendf(eb->extra, "%s ", arrow);
+
+    const char* segment = command;
+    for (const char* p = command; *p != '\0'; ++p) {
+        if (*p != '\n' && *p != '\r') {
+            continue;
+        }
+
+        if (p > segment) {
+            sbuf_append_n(eb->extra, segment, p - segment);
+        }
+
+        sbuf_append(eb->extra, "\n  ");
+        if (*p == '\r' && p[1] == '\n') {
+            ++p;
+        }
+        segment = p + 1;
+    }
+
+    if (*segment != '\0') {
+        sbuf_append(eb->extra, segment);
+    }
+
+    sbuf_append(eb->extra, "[/pre][/ic-menu-selected]");
+}
+
 static ssize_t history_menu_input_rows(ic_env_t* env, editor_t* eb) {
     if (env == NULL || eb == NULL) {
         return 1;
@@ -565,7 +689,7 @@ static bool history_menu_mouse_select(ic_env_t* env, editor_t* eb, ssize_t match
 
     ssize_t target_row = 0;
     ssize_t target_col = 0;
-    if (!edit_mouse_event_to_target_rowcol(env, eb, &mouse_event, &target_row, &target_col)) {
+    if (!edit_mouse_event_to_target_rowcol(env, eb, &mouse_event, &target_row, &target_col, NULL)) {
         return false;
     }
     ic_unused(target_col);
@@ -671,6 +795,8 @@ again:;
     bool metadata_filter_applied = false;
     char metadata_preview_key[64];
     metadata_preview_key[0] = '\0';
+    const char* metadata_suffix_key = k_history_search_timestamp_key;
+    bool metadata_suffix_use_default_tag = true;
 
     {
         const char* query = sbuf_string(eb->input);
@@ -678,6 +804,15 @@ again:;
         (void)ic_enable_highlight(suppress_highlight ? false : old_highlight);
         (void)history_search_extract_preview_key(query, metadata_preview_key,
                                                  sizeof(metadata_preview_key));
+
+        if (metadata_preview_key[0] != '\0') {
+            metadata_suffix_key = metadata_preview_key;
+            metadata_suffix_use_default_tag = false;
+        } else {
+            metadata_suffix_key = k_history_search_timestamp_key;
+            metadata_suffix_use_default_tag = true;
+        }
+
         history_fuzzy_search_with_case(env->history, query ? query : "", matches, MAX_FUZZY_RESULTS,
                                        &match_count, &metadata_filter_applied,
                                        session_case_sensitive);
@@ -704,11 +839,21 @@ again:;
 
     sbuf_clear(eb->extra);
     const char* mouse_suffix = (menu_mouse_scroll_enabled ? " | Mouse clicking is enabled" : "");
+    ssize_t selected_multiline_preview_rows = 0;
 
     if (match_count > 0) {
         const char* query = sbuf_string(eb->input);
         bool is_filtered = (query != NULL && query[0] != '\0');
         ssize_t total_history = history_snapshot_count(&snap);
+
+        if (selected_idx >= 0 && selected_idx < match_count) {
+            const history_entry_t* selected_entry =
+                history_snapshot_get(&snap, matches[selected_idx].hidx);
+            if (selected_entry != NULL && selected_entry->command != NULL &&
+                history_menu_contains_line_break(selected_entry->command)) {
+                selected_multiline_preview_rows = history_menu_line_count(selected_entry->command);
+            }
+        }
 
         if (showing_all_due_to_no_matches) {
             sbuf_appendf(eb->extra,
@@ -742,7 +887,15 @@ again:;
             available_lines = 3;
         }
 
-        ssize_t display_count = (match_count > available_lines) ? available_lines : match_count;
+        ssize_t rows_for_items = available_lines;
+        if (selected_multiline_preview_rows > 1) {
+            rows_for_items -= (selected_multiline_preview_rows - 1);
+            if (rows_for_items < 1) {
+                rows_for_items = 1;
+            }
+        }
+
+        ssize_t display_count = (match_count > rows_for_items) ? rows_for_items : match_count;
         if (display_count < 1) {
             display_count = 1;
         }
@@ -783,11 +936,30 @@ again:;
             char metadata_suffix[160];
             metadata_suffix[0] = '\0';
             ssize_t metadata_reserved_columns = 0;
-            if (metadata_preview_key[0] != '\0') {
-                const char* meta_value = history_entry_get_metadata(entry, metadata_preview_key);
+            if (metadata_suffix_use_default_tag) {
+                const char* exit_code = history_search_entry_exit_code(entry);
                 char formatted_meta_value[64];
                 const char* shown_value = history_search_pretty_metadata_value(
-                    metadata_preview_key, meta_value, formatted_meta_value,
+                    k_history_search_timestamp_key,
+                    history_entry_get_metadata(entry, k_history_search_timestamp_key),
+                    formatted_meta_value, sizeof(formatted_meta_value));
+
+                if (exit_code != NULL) {
+                    int suffix_written = snprintf(metadata_suffix, sizeof(metadata_suffix),
+                                                  " [%s | %s]", shown_value, exit_code);
+                    if (suffix_written > 0) {
+                        if (suffix_written >= (int)sizeof(metadata_suffix)) {
+                            suffix_written = (int)sizeof(metadata_suffix) - 1;
+                            metadata_suffix[suffix_written] = '\0';
+                        }
+                        metadata_reserved_columns = suffix_written;
+                    }
+                }
+            } else if (metadata_suffix_key != NULL && metadata_suffix_key[0] != '\0') {
+                const char* meta_value = history_entry_get_metadata(entry, metadata_suffix_key);
+                char formatted_meta_value[64];
+                const char* shown_value = history_search_pretty_metadata_value(
+                    metadata_suffix_key, meta_value, formatted_meta_value,
                     sizeof(formatted_meta_value));
                 int suffix_written =
                     snprintf(metadata_suffix, sizeof(metadata_suffix), " [%s]", shown_value);
@@ -832,6 +1004,17 @@ again:;
             }
 
             bool is_selected = (match_idx == selected_idx);
+            bool show_selected_multiline_inline = (is_selected && is_multiline);
+
+            if (show_selected_multiline_inline) {
+                history_menu_append_multiline_preview(env, eb, display);
+                if (metadata_suffix[0] != '\0') {
+                    sbuf_appendf(eb->extra, "[ic-menu-selected-secondary]%s[/]", metadata_suffix);
+                }
+                sbuf_append(eb->extra, "\n");
+                continue;
+            }
+
             if (is_selected) {
                 sbuf_append(eb->extra, "[ic-menu-selected]");
             }

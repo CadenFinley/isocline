@@ -108,6 +108,7 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     // Set default enabled features
     env->hint_delay = 0;                        // hint delay (0)
     env->spell_correct = true;                  // completion spell fixing
+    env->spell_correct_on_enter = false;        // enter-submit spell correction
     env->show_line_numbers = true;              // line numbers
     env->relative_line_numbers = false;         // absolute numbering by default
     env->highlight_current_line_number = true;  // highlight current line number by default
@@ -115,6 +116,7 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->replace_prompt_line_with_line_number = false;  // keep final prompt line visible by default
     env->complete_nopreview = false;            // completion preview (inverted: false = enabled)
     env->complete_menu_start_expanded = false;  // keep completion menu collapsed by default
+    env->completion_click_accept_enabled = false;  // keep click-to-accept off by default
     env->no_hint = false;                       // hint (inverted: false = enabled)
     env->complete_autotab = false;              // auto tab (disabled by default)
     env->no_help = false;                       // inline help (inverted: false = enabled)
@@ -122,9 +124,10 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->singleline_only = false;               // multiline (inverted: false = enabled)
     env->multiline_start_line_count = 1;        // preallocated prompt lines when multiline is on
     env->last_readline_disposition = IC_READLINE_DISPOSITION_ERROR;
-    env->status_hint_mode = IC_STATUS_HINT_NORMAL;    // default to legacy behavior
-    env->mouse_reporting_enabled_by_default = false;  // keep per-prompt toggle behavior by default
-    env->mouse_reporting_status_line_enabled = true;  // show indicator line when mouse is active
+    env->status_hint_mode = IC_STATUS_HINT_NORMAL;      // default to legacy behavior
+    env->mouse_reporting_mode = IC_MOUSE_CLICKING_DISABLED;  // keep mouse capture off by default
+    env->mouse_reporting_enabled_by_default = false;         // start sessions with mouse capture off
+    env->mouse_reporting_status_line_enabled = true;         // show indicator line when mouse is active
     env->inline_right_prompt_follows_cursor = false;  // keep right prompt anchored at row 0
     env->bracketed_paste_enabled = false;
 

@@ -84,9 +84,11 @@ struct ic_env_s {
     ic_check_for_continuation_or_return_fun_t*
         continuation_check_callback;          // callback that decides whether to submit or continue
     void* continuation_check_arg;             // user state for the continuation callback
-    ic_status_hint_mode_t status_hint_mode;   // rendering behavior for default hints
-    bool mouse_reporting_enabled_by_default;  // start each readline session with mouse reporting
-                                              // enabled?
+    ic_status_hint_mode_t status_hint_mode;  // rendering behavior for default hints
+    ic_mouse_clicking_mode_t
+        mouse_reporting_mode;                 // capture strategy for mouse interaction sessions
+    bool mouse_reporting_enabled_by_default;  // should new readline sessions start with mouse
+                                              // capture active?
     bool mouse_reporting_status_line_enabled;  // show mouse-reporting indicator in the status
                                                // line?
     const char* match_braces;                  // matching braces, e.g "()[]{}"
@@ -101,6 +103,7 @@ struct ic_env_s {
     bool complete_nopreview;             // do not show completion preview for each
                                          // selection in the completion menu?
     bool complete_menu_start_expanded;   // open completion menus expanded by default?
+    bool completion_click_accept_enabled;  // should completion clicks accept immediately?
     bool complete_autotab;               // try to keep completing after a completion?
     bool no_multiline_indent;            // indent continuation lines to line up under the
                                          // initial prompt
@@ -112,6 +115,7 @@ struct ic_env_s {
     bool no_lscolors;                    // use LSCOLORS/LS_COLORS to colorize file name
                                          // completions?
     bool spell_correct;                  // enable spell correction on completions?
+    bool spell_correct_on_enter;         // apply single spell correction when submitting?
     bool show_line_numbers;              // show line numbers in multiline mode?
     bool relative_line_numbers;          // use relative line numbers when enabled?
     bool highlight_current_line_number;  // highlight the current line number differently?
@@ -119,15 +123,9 @@ struct ic_env_s {
                                                        // prompts are active?
     bool replace_prompt_line_with_line_number;         // swap final prompt line with line numbers?
     bool show_whitespace_characters;                   // visualize spaces while editing?
-    bool prompt_cleanup;                               // after enter, rewrite prompt inline?
-    bool prompt_cleanup_add_empty_line;                // optionally add empty line after
-                                                       // cleanup
-    bool prompt_cleanup_truncate_multiline;            // during cleanup, collapse multiline input
-    bool prompt_cleanup_newline_after_execution;       // request newline spacing between prompts
     bool inline_right_prompt_follows_cursor;           // right prompt tracks cursor row
     bool bracketed_paste_enabled;                      // bracketed paste mode active
     size_t multiline_start_line_count;  // prefill multiline prompts with this many lines
-    size_t prompt_cleanup_extra_lines;  // additional terminal lines to erase during cleanup
     long hint_delay;                    // delay before displaying a hint in milliseconds
 
     ic_key_binding_entry_t* key_bindings;  // dynamic array of custom key bindings
