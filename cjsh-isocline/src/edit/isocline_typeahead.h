@@ -1,5 +1,5 @@
 /*
-  isocline.c
+  isocline_typeahead.h
 
   This file is part of isocline
 
@@ -28,46 +28,25 @@
   SOFTWARE.
 */
 
-//-------------------------------------------------------------
-// Single-translation-unit aggregation helper
-//-------------------------------------------------------------
-#if !defined(IC_SEPARATE_OBJS)
-#ifndef _CRT_NONSTDC_NO_WARNINGS
-#define _CRT_NONSTDC_NO_WARNINGS  // for msvc
-#endif
-#ifndef _CRT_SECURE_NO_WARNINGS
-#define _CRT_SECURE_NO_WARNINGS  // for msvc
-#endif
-#define _XOPEN_SOURCE 700
-#define _DEFAULT_SOURCE
-#include "attr.c"
-#include "bbcode.c"
-#include "common.c"
-#include "completers.c"
-#include "completions.c"
-#include "editline.c"
-#include "highlight.c"
-#include "history.c"
-#include "isocline_env.c"
-#include "isocline_keybindings.c"
-#include "isocline_options.c"
-#include "isocline_print.c"
-#include "isocline_readline.c"
-#include "isocline_terminal.c"
-#include "prompt_line_replacement.c"
-#include "stringbuf.c"
-#include "term.c"
-#include "tty.c"
-#include "tty_esc.c"
-#include "undo.c"
-#include "unicode.c"
-#else
-#if defined(__GNUC__) || defined(__clang__)
-#define IC_ANCHOR_UNUSED __attribute__((unused))
-#else
-#define IC_ANCHOR_UNUSED
-#endif
-static void IC_ANCHOR_UNUSED ic_isocline_translation_unit_anchor(void) {
-}
-#undef IC_ANCHOR_UNUSED
+#pragma once
+#ifndef IC_TYPEAHEAD_H
+#define IC_TYPEAHEAD_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "common.h"
+#include "env.h"
+#include "stringbuf.h"
+
+ic_private void ic_typeahead_filter_escape_sequences_into(const char* input, size_t input_len,
+                                                          stringbuf_t* output);
+ic_private void ic_typeahead_normalize_line_edit_sequences_into(const char* input, size_t input_len,
+                                                                stringbuf_t* output);
+ic_private bool ic_typeahead_ingest_raw_input(const uint8_t* data, size_t length);
+ic_private void ic_typeahead_prepare_for_readline(ic_env_t* env);
+ic_private const char* ic_typeahead_pending_initial_input(ic_env_t* env);
+ic_private ssize_t ic_typeahead_pending_initial_input_len(ic_env_t* env);
+ic_private ssize_t ic_typeahead_pending_raw_byte_count(ic_env_t* env);
+
 #endif
