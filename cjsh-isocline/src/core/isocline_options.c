@@ -130,6 +130,34 @@ ic_public void ic_set_prompt_marker(const char* prompt_marker, const char* cprom
     ic_env_apply_prompt_markers(env, prompt_marker, cprompt_marker);
 }
 
+ic_public void ic_set_history_search_prompt(const char* prompt_text) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return;
+    ic_env_apply_history_search_prompt(env, prompt_text);
+}
+
+ic_public const char* ic_get_history_search_prompt(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return NULL;
+    return ic_env_get_history_search_prompt(env);
+}
+
+ic_public void ic_set_command_palette_prompt(const char* prompt_text) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return;
+    ic_env_apply_command_palette_prompt(env, prompt_text);
+}
+
+ic_public const char* ic_get_command_palette_prompt(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return NULL;
+    return ic_env_get_command_palette_prompt(env);
+}
+
 ic_public bool ic_enable_multiline(bool enable) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -254,6 +282,33 @@ ic_public bool ic_completion_click_accept_is_enabled(void) {
     if (env == NULL)
         return false;
     return env->completion_click_accept_enabled;
+}
+
+ic_public ic_menu_highlight_mode_t ic_set_menu_highlight_mode(ic_menu_highlight_mode_t mode) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return IC_MENU_HIGHLIGHT_NONE;
+
+    ic_menu_highlight_mode_t prev = env->menu_highlight_mode;
+    switch (mode) {
+        case IC_MENU_HIGHLIGHT_NONE:
+        case IC_MENU_HIGHLIGHT_SINGLE:
+        case IC_MENU_HIGHLIGHT_ALL:
+        case IC_MENU_HIGHLIGHT_REVERSE:
+            env->menu_highlight_mode = mode;
+            break;
+        default:
+            env->menu_highlight_mode = IC_MENU_HIGHLIGHT_NONE;
+            break;
+    }
+    return prev;
+}
+
+ic_public ic_menu_highlight_mode_t ic_get_menu_highlight_mode(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return IC_MENU_HIGHLIGHT_NONE;
+    return env->menu_highlight_mode;
 }
 
 ic_public bool ic_enable_multiline_indent(bool enable) {

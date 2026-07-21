@@ -76,6 +76,8 @@ struct ic_env_s {
     const char* cprompt_marker;       // prompt marker for continuation lines
                                       // (defaults to `prompt_marker`)
     char* prompt_eol_mark;            // marker shown when preserving partial pre-prompt output
+    char* history_search_prompt;      // prompt shown while fuzzy searching history
+    char* command_palette_prompt;     // prompt shown while searching the command palette
     ic_highlight_fun_t* highlighter;  // highlight callback
     void* highlighter_arg;            // user state for the highlighter.
     ic_unhandled_key_fun_t* unhandled_key_handler;     // callback for unhandled keys
@@ -110,6 +112,7 @@ struct ic_env_s {
                                            // selection in the completion menu?
     bool complete_menu_start_expanded;     // open completion menus expanded by default?
     bool completion_click_accept_enabled;  // should completion clicks accept immediately?
+    ic_menu_highlight_mode_t menu_highlight_mode;  // syntax highlight completion/history menus
     bool complete_autotab;                 // try to keep completing after a completion?
     bool no_multiline_indent;              // indent continuation lines to line up under the
                                            // initial prompt

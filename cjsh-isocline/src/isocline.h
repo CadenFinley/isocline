@@ -641,6 +641,20 @@ void ic_set_prompt_eol_mark(const char* eol_mark);
 /// Returns NULL when the built-in default marker is active.
 const char* ic_get_prompt_eol_mark(void);
 
+/// Set the prompt shown while fuzzy-searching history.
+/// Pass NULL to restore the default ("history search: ").
+void ic_set_history_search_prompt(const char* prompt_text);
+
+/// Get the current history search prompt.
+const char* ic_get_history_search_prompt(void);
+
+/// Set the prompt shown while searching the command palette.
+/// Pass NULL to restore the default ("command palette: ").
+void ic_set_command_palette_prompt(const char* prompt_text);
+
+/// Get the current command palette prompt.
+const char* ic_get_command_palette_prompt(void);
+
 /// Disable or enable multi-line input (enabled by default).
 /// Returns the previous setting.
 bool ic_enable_multiline(bool enable);
@@ -686,6 +700,24 @@ bool ic_enable_completion_click_accept(bool enable);
 
 /// Returns whether click-to-accept for completion candidates is currently enabled.
 bool ic_completion_click_accept_is_enabled(void);
+
+/// Menu item syntax-highlighting mode for completion and history search menus.
+typedef enum ic_menu_highlight_mode_e {
+    IC_MENU_HIGHLIGHT_NONE = 0,
+    IC_MENU_HIGHLIGHT_SINGLE = 1,
+    IC_MENU_HIGHLIGHT_ALL = 2,
+    IC_MENU_HIGHLIGHT_REVERSE = 3,
+} ic_menu_highlight_mode_t;
+
+/// Configure syntax highlighting for completion and history menu items.
+/// `none` preserves the legacy unhighlighted menu, `single` highlights only
+/// the selected item, `all` highlights every rendered item, and `reverse`
+/// highlights every rendered item except the selected item.
+/// Returns the previous mode.
+ic_menu_highlight_mode_t ic_set_menu_highlight_mode(ic_menu_highlight_mode_t mode);
+
+/// Returns the current completion/history menu item highlighting mode.
+ic_menu_highlight_mode_t ic_get_menu_highlight_mode(void);
 
 /// Disable or enable automatic identation of continuation lines in multiline
 /// input so it aligns with the initial prompt. (enabled by default)
