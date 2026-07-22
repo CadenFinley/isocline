@@ -153,15 +153,16 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->complete_menu_start_expanded = false;     // keep completion menu collapsed by default
     env->completion_click_accept_enabled = false;  // keep click-to-accept off by default
     env->menu_highlight_mode = IC_MENU_HIGHLIGHT_NONE;  // keep menu items unhighlighted by default
-    env->no_hint = false;                          // hint (inverted: false = enabled)
-    env->complete_autotab = false;                 // auto tab (disabled by default)
-    env->no_help = false;                          // inline help (inverted: false = enabled)
-    env->no_multiline_indent = false;              // multiline indent (inverted: false = enabled)
-    env->singleline_only = false;                  // multiline (inverted: false = enabled)
-    env->multiline_start_line_count = 1;           // preallocated prompt lines when multiline is on
+    env->no_hint = false;                               // hint (inverted: false = enabled)
+    env->complete_autotab = false;                      // auto tab (disabled by default)
+    env->no_help = false;                               // inline help (inverted: false = enabled)
+    env->no_multiline_indent = false;     // multiline indent (inverted: false = enabled)
+    env->singleline_only = false;         // multiline (inverted: false = enabled)
+    env->multiline_start_line_count = 1;  // preallocated prompt lines when multiline is on
     env->last_readline_disposition = IC_READLINE_DISPOSITION_ERROR;
-    env->status_hint_mode = IC_STATUS_HINT_NORMAL;           // default to legacy behavior
-    env->mouse_reporting_mode = IC_MOUSE_CLICKING_DISABLED;  // keep mouse capture off by default
+    env->status_hint_mode = IC_STATUS_HINT_NORMAL;             // default to legacy behavior
+    env->mouse_reporting_mode = IC_MOUSE_CLICKING_DISABLED;    // keep mouse capture off by default
+    env->history_search_sort = IC_HISTORY_SEARCH_SORT_RECENT;  // newest history entries first
     env->mouse_reporting_enabled_by_default = false;  // start sessions with mouse capture off
     env->mouse_reporting_status_line_enabled = true;  // show indicator line when mouse is active
     env->inline_right_prompt_follows_cursor = false;  // keep right prompt anchored at row 0
@@ -245,6 +246,7 @@ static void ic_env_free(ic_env_t* env) {
     mem_free(env->mem, env->prompt_eol_mark);
     mem_free(env->mem, env->history_search_prompt);
     mem_free(env->mem, env->command_palette_prompt);
+    mem_free(env->mem, env->history_search_sort_key);
     mem_free(env->mem, env->match_braces);
     mem_free(env->mem, env->auto_braces);
     mem_free(env->mem, (void*)env->initial_input);
