@@ -70,7 +70,7 @@ static char* ic_getline(alloc_t* mem) {
             last_char = c;
             break;
         } else {
-            sbuf_append_char(sb, (char)c);
+            (void)sbuf_append_char(sb, (char)c);
         }
         if (getline_interrupt) {
             last_char = 0;
@@ -142,21 +142,29 @@ static ic_readline_result_t ic_readline_with_status_impl(const char* prompt_text
         }
 
         result.disposition = env->last_readline_disposition;
+        if (result.disposition != IC_READLINE_DISPOSITION_SUBMIT) {
+            ic_term_abort_input_region(env);
+        }
         result.tty_lost = (env->tty != NULL && tty_lost_terminal(env->tty));
         return result;
     }
 
     if (env->tty != NULL && env->term != NULL) {
         term_start_raw(env->term);
+        ic_term_mark_prompt_start(env, false);
         if (prompt_text != NULL) {
             term_write(env->term, prompt_text);
         }
         term_write(env->term, env->prompt_marker);
+        ic_term_mark_input_start(env);
         term_end_raw(env->term, false);
     }
 
     result.input = ic_getline(env->mem);
     result.disposition = classify_disposition_with_fallback(result.input);
+    if (result.disposition != IC_READLINE_DISPOSITION_SUBMIT) {
+        ic_term_abort_input_region(env);
+    }
     env->last_readline_disposition = result.disposition;
     result.tty_lost = (env->tty != NULL && tty_lost_terminal(env->tty));
     return result;
@@ -216,6 +224,7 @@ ic_public void ic_print_prompt(const char* prompt_text, bool continuation_line) 
     }
 
     term_start_raw(env->term);
+    ic_term_mark_prompt_start(env, continuation_line);
 
     const char* text = (prompt_text != NULL ? prompt_text : "");
 
@@ -230,6 +239,7 @@ ic_public void ic_print_prompt(const char* prompt_text, bool continuation_line) 
     bbcode_print(env->bbcode, (continuation_line ? env->cprompt_marker : env->prompt_marker));
 
     bbcode_style_close(env->bbcode, NULL);
+    ic_term_mark_input_start(env);
     term_flush(env->term);
 }
 
@@ -323,11 +333,11 @@ ic_public char* ic_read_heredoc(const char* delimiter, bool strip_tabs) {
         // Not the delimiter, add line to content
         // If strip_tabs, use the tab-stripped version
         if (strip_tabs) {
-            sbuf_append(content, check_line);
+            (void)sbuf_append(content, check_line);
         } else {
-            sbuf_append(content, line);
+            (void)sbuf_append(content, line);
         }
-        sbuf_append_char(content, '\n');
+        (void)sbuf_append_char(content, '\n');
 
         ic_free(line);
         line_number++;

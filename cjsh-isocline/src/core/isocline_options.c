@@ -180,6 +180,15 @@ ic_public bool ic_enable_multiline(bool enable) {
     return !prev;
 }
 
+ic_public bool ic_enable_multiline_continuation_retention(bool enable) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return false;
+    bool prev = env->retain_multiline_continuation;
+    env->retain_multiline_continuation = enable;
+    return prev;
+}
+
 ic_public bool ic_enable_beep(bool enable) {
     ic_env_t* env = ic_get_env();
     if (env == NULL)
@@ -298,7 +307,7 @@ ic_public void ic_history_add_with_metadata(const char* entry,
     ic_env_t* env = ic_get_env();
     if (env == NULL)
         return;
-    history_push_with_metadata(env->history, entry, metadata, metadata_count);
+    (void)history_push_with_metadata(env->history, entry, metadata, metadata_count);
 }
 
 ic_public void ic_history_add(const char* entry) {
@@ -416,6 +425,54 @@ ic_public size_t ic_get_multiline_start_line_count(void) {
     if (env == NULL)
         return 1;
     return env->multiline_start_line_count;
+}
+
+ic_public size_t ic_set_multiline_max_line_count(size_t line_count) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return 15;
+
+    size_t prev = env->multiline_max_line_count;
+    if (line_count < 1) {
+        line_count = 1;
+    }
+
+    const size_t max_lines = 256;
+    if (line_count > max_lines) {
+        line_count = max_lines;
+    }
+
+    env->multiline_max_line_count = line_count;
+    return prev;
+}
+
+ic_public size_t ic_get_multiline_max_line_count(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return 15;
+    return env->multiline_max_line_count;
+}
+
+ic_public size_t ic_set_multiline_bottom_line_count(size_t line_count) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return 3;
+
+    size_t prev = env->multiline_bottom_line_count;
+    const size_t max_lines = 256;
+    if (line_count > max_lines) {
+        line_count = max_lines;
+    }
+
+    env->multiline_bottom_line_count = line_count;
+    return prev;
+}
+
+ic_public size_t ic_get_multiline_bottom_line_count(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL)
+        return 3;
+    return env->multiline_bottom_line_count;
 }
 
 ic_public bool ic_enable_line_numbers(bool enable) {
@@ -632,6 +689,7 @@ static ic_mouse_clicking_mode_t ic_normalize_mouse_clicking_mode(ic_mouse_clicki
         case IC_MOUSE_CLICKING_DISABLED:
         case IC_MOUSE_CLICKING_SIMPLE:
         case IC_MOUSE_CLICKING_SMART:
+        case IC_MOUSE_CLICKING_MENU_ONLY:
             return mode;
         default:
             return IC_MOUSE_CLICKING_SMART;
@@ -646,7 +704,8 @@ ic_public ic_mouse_clicking_mode_t ic_set_mouse_clicking_mode(ic_mouse_clicking_
     ic_mouse_clicking_mode_t prev = env->mouse_reporting_mode;
     env->mouse_reporting_mode = ic_normalize_mouse_clicking_mode(mode);
     env->mouse_reporting_enabled_by_default =
-        (env->mouse_reporting_mode != IC_MOUSE_CLICKING_DISABLED);
+        (env->mouse_reporting_mode == IC_MOUSE_CLICKING_SIMPLE ||
+         env->mouse_reporting_mode == IC_MOUSE_CLICKING_SMART);
     return prev;
 }
 
@@ -663,7 +722,8 @@ ic_public bool ic_enable_mouse_clicking(bool enable) {
         return false;
     bool prev = env->mouse_reporting_enabled_by_default;
     env->mouse_reporting_enabled_by_default = enable;
-    if (enable && env->mouse_reporting_mode == IC_MOUSE_CLICKING_DISABLED) {
+    if (enable && (env->mouse_reporting_mode == IC_MOUSE_CLICKING_DISABLED ||
+                   env->mouse_reporting_mode == IC_MOUSE_CLICKING_MENU_ONLY)) {
         env->mouse_reporting_mode = IC_MOUSE_CLICKING_SIMPLE;
     }
     return prev;

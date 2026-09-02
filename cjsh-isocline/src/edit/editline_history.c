@@ -439,6 +439,35 @@ static void history_search_sort_matches(const history_snapshot_t* snap, history_
     g_history_search_match_sort_context = old_ctx;
 }
 
+// The newest history entry is scratch space for the live editor buffer. Keep it available for
+// normal history navigation, but do not present it as a fuzzy-search result.
+static void history_search_remove_scratch_match(history_match_t* matches, ssize_t* match_count) {
+    if (matches == NULL || match_count == NULL || *match_count <= 0) {
+        return;
+    }
+
+    ssize_t write_idx = 0;
+    for (ssize_t read_idx = 0; read_idx < *match_count; ++read_idx) {
+        if (matches[read_idx].hidx == 0) {
+            continue;
+        }
+        if (write_idx != read_idx) {
+            matches[write_idx] = matches[read_idx];
+        }
+        write_idx++;
+    }
+    *match_count = write_idx;
+}
+
+static void history_search_append_empty_selection(ic_env_t* env, editor_t* eb) {
+    if (env == NULL || eb == NULL || eb->extra == NULL) {
+        return;
+    }
+
+    const char* arrow = (tty_is_utf8(env->tty) ? "\xE2\x86\x92" : ">");
+    (void)sbuf_appendf(eb->extra, "[ic-menu-selected][!pre]%s [/pre][/ic-menu-selected]\n", arrow);
+}
+
 static const char* history_search_sort_label(ic_history_search_sort_t sort,
                                              const char* metadata_key, char* label_buf,
                                              size_t label_buf_size) {
@@ -665,7 +694,7 @@ static void edit_history_at(ic_env_t* env, editor_t* eb, int ofs) {
             eb->history_prefix_active = false;
         }
 
-        history_update(env->history, current_input != NULL ? current_input : "");
+        (void)history_update(env->history, current_input != NULL ? current_input : "");
         eb->history_idx = 0;
         eb->modified = false;
     }
@@ -950,6 +979,10 @@ static void edit_yank_last_arg(ic_env_t* env, editor_t* eb) {
 
 #define MAX_FUZZY_RESULTS 5000
 
+static const char* const k_history_menu_footer =
+    "[ic-diminish](↑↓/wheel:navigate shift+↑/↓:page enter:run tab:edit alt+c:case "
+    "alt+s:sort esc:cancel)[/]";
+
 static void edit_history_fuzzy_search(ic_env_t* env, editor_t* eb, char* initial) {
     history_snapshot_t snap = {0};
     if (!history_snapshot_load(env->history, &snap, true)) {
@@ -963,20 +996,14 @@ static void edit_history_fuzzy_search(ic_env_t* env, editor_t* eb, char* initial
         return;
     }
 
-    if (eb->modified) {
-        history_update(env->history, sbuf_string(eb->input));
-        eb->history_idx = 0;
-        eb->modified = false;
-        history_snapshot_free(env->history, &snap);
-        if (!history_snapshot_load(env->history, &snap, true)) {
-            term_beep(env->term);
-            return;
-        }
-        if (history_snapshot_count(&snap) <= 0) {
-            term_beep(env->term);
-            history_snapshot_free(env->history, &snap);
-            return;
-        }
+    const bool original_modified = eb->modified;
+    bool has_live_input = original_modified;
+    if (!has_live_input) {
+        const char* current_input = sbuf_string(eb->input);
+        const history_entry_t* scratch_entry = history_snapshot_get(&snap, 0);
+        has_live_input =
+            (current_input != NULL && current_input[0] != '\0' && scratch_entry != NULL &&
+             scratch_entry->command != NULL && strcmp(current_input, scratch_entry->command) == 0);
     }
 
     history_snapshot_free(env->history, &snap);
@@ -993,10 +1020,11 @@ static void edit_history_fuzzy_search(ic_env_t* env, editor_t* eb, char* initial
     }
 
     ssize_t match_count = 0;
-    ssize_t selected_idx = 0;
+    ssize_t selected_idx = (has_live_input ? -1 : 0);
     ssize_t scroll_offset = 0;
     ssize_t last_display_count = 0;
     ssize_t last_max_scroll = 0;
+    ssize_t last_status_rows = 1;
     bool session_case_sensitive = ic_history_fuzzy_search_is_case_sensitive();
     const char* configured_sort_key = NULL;
     ic_history_search_sort_t session_sort = ic_get_history_search_sort(&configured_sort_key);
@@ -1021,6 +1049,7 @@ again:;
 
     last_display_count = 0;
     last_max_scroll = 0;
+    last_status_rows = 1;
 
     bool showing_all_due_to_no_matches = false;
     bool metadata_filter_applied = false;
@@ -1053,13 +1082,19 @@ again:;
             metadata_suffix_use_default_tag = false;
         }
 
-        history_fuzzy_search_with_case(env->history, query ? query : "", matches, MAX_FUZZY_RESULTS,
-                                       &match_count, &metadata_filter_applied,
-                                       session_case_sensitive);
+        (void)history_fuzzy_search_with_case(env->history, query ? query : "", matches,
+                                             MAX_FUZZY_RESULTS, &match_count,
+                                             &metadata_filter_applied, session_case_sensitive);
+        if (has_live_input) {
+            history_search_remove_scratch_match(matches, &match_count);
+        }
 
         if (match_count == 0 && query != NULL && query[0] != '\0' && !metadata_filter_applied) {
-            history_fuzzy_search_with_case(env->history, "", matches, MAX_FUZZY_RESULTS,
-                                           &match_count, NULL, session_case_sensitive);
+            (void)history_fuzzy_search_with_case(env->history, "", matches, MAX_FUZZY_RESULTS,
+                                                 &match_count, NULL, session_case_sensitive);
+            if (has_live_input) {
+                history_search_remove_scratch_match(matches, &match_count);
+            }
             showing_all_due_to_no_matches = true;
         }
     }
@@ -1074,7 +1109,7 @@ again:;
     if (selected_idx >= match_count) {
         selected_idx = match_count > 0 ? match_count - 1 : 0;
     }
-    if (selected_idx < 0) {
+    if (selected_idx < 0 && !has_live_input) {
         selected_idx = 0;
     }
 
@@ -1089,7 +1124,10 @@ again:;
     if (match_count > 0) {
         const char* query = sbuf_string(eb->input);
         bool is_filtered = (query != NULL && query[0] != '\0');
-        ssize_t total_history = history_snapshot_count(&snap);
+        ssize_t total_history = history_snapshot_count(&snap) - (has_live_input ? 1 : 0);
+        if (total_history < 0) {
+            total_history = 0;
+        }
 
         if (selected_idx >= 0 && selected_idx < match_count) {
             const history_entry_t* selected_entry =
@@ -1101,33 +1139,42 @@ again:;
         }
 
         if (showing_all_due_to_no_matches) {
-            sbuf_appendf(
+            (void)sbuf_appendf(
                 eb->extra,
                 "[ic-info]No matches - showing all history (%zd entr%s) - case %s - sort %s%s[/]\n",
                 total_history, total_history == 1 ? "y" : "ies",
                 session_case_sensitive ? "sensitive" : "insensitive", sort_label, mouse_suffix);
         } else if (is_filtered) {
             if (metadata_filter_applied) {
-                sbuf_appendf(
+                (void)sbuf_appendf(
                     eb->extra,
                     "[ic-info]%zd match%s found (metadata filter) - case %s - sort %s%s[/]\n",
                     match_count, match_count == 1 ? "" : "es",
                     session_case_sensitive ? "sensitive" : "insensitive", sort_label, mouse_suffix);
             } else {
-                sbuf_appendf(eb->extra, "[ic-info]%zd match%s found - case %s - sort %s%s[/]\n",
-                             match_count, match_count == 1 ? "" : "es",
-                             session_case_sensitive ? "sensitive" : "insensitive", sort_label,
-                             mouse_suffix);
+                (void)sbuf_appendf(
+                    eb->extra, "[ic-info]%zd match%s found - case %s - sort %s%s[/]\n", match_count,
+                    match_count == 1 ? "" : "es",
+                    session_case_sensitive ? "sensitive" : "insensitive", sort_label, mouse_suffix);
             }
         } else {
-            sbuf_appendf(eb->extra, "[ic-info]History (%zd entr%s) - case %s - sort %s%s[/]\n",
-                         total_history, total_history == 1 ? "y" : "ies",
-                         session_case_sensitive ? "sensitive" : "insensitive", sort_label,
-                         mouse_suffix);
+            (void)sbuf_appendf(
+                eb->extra, "[ic-info]History (%zd entr%s) - case %s - sort %s%s[/]\n",
+                total_history, total_history == 1 ? "y" : "ies",
+                session_case_sensitive ? "sensitive" : "insensitive", sort_label, mouse_suffix);
+        }
+
+        const bool show_empty_selection = (has_live_input && selected_idx < 0);
+        if (show_empty_selection) {
+            history_search_append_empty_selection(env, eb);
         }
 
         ssize_t term_width = term_get_width(env->term);
-        ssize_t available_lines = edit_menu_available_lines(env, eb, 4, 3);
+        last_status_rows = edit_menu_rendered_rows(env, eb, sbuf_string(eb->extra));
+        ssize_t footer_rows =
+            (!env->no_help ? edit_menu_rendered_rows(env, eb, k_history_menu_footer) : 0);
+        ssize_t reserved_rows = edit_menu_input_rows(env, eb) + last_status_rows + footer_rows + 1;
+        ssize_t available_lines = edit_menu_available_lines(env, eb, reserved_rows, 1);
 
         ssize_t rows_for_items = available_lines;
         if (selected_multiline_preview_rows > 1) {
@@ -1235,17 +1282,17 @@ again:;
                 if (metadata_suffix[0] != '\0') {
                     edit_menu_append_tag_text(eb->extra, true, metadata_suffix);
                 }
-                sbuf_append(eb->extra, "\n");
+                (void)sbuf_append(eb->extra, "\n");
                 continue;
             }
 
             if (is_selected) {
-                sbuf_append(eb->extra, "[ic-menu-selected]");
+                (void)sbuf_append(eb->extra, "[ic-menu-selected]");
             }
             const char* arrow = (tty_is_utf8(env->tty) ? "\xE2\x86\x92" : ">");
-            sbuf_appendf(eb->extra, "[!pre]%s ", (is_selected ? arrow : " "));
+            (void)sbuf_appendf(eb->extra, "[!pre]%s ", (is_selected ? arrow : " "));
             if (syntax_highlight_item) {
-                sbuf_append(eb->extra, "[/pre]");
+                (void)sbuf_append(eb->extra, "[/pre]");
             }
 
             bool highlight_match =
@@ -1257,11 +1304,11 @@ again:;
                                                 highlight_match, env, syntax_highlight_item);
 
             if (append_ellipsis && max_columns > 3) {
-                sbuf_append(eb->extra, "...");
+                (void)sbuf_append(eb->extra, "...");
             }
 
             if (!syntax_highlight_item) {
-                sbuf_append(eb->extra, "[/pre]");
+                (void)sbuf_append(eb->extra, "[/pre]");
             }
 
             if (metadata_suffix[0] != '\0') {
@@ -1269,46 +1316,51 @@ again:;
             }
 
             if (is_selected) {
-                sbuf_append(eb->extra, "[/ic-menu-selected]");
+                (void)sbuf_append(eb->extra, "[/ic-menu-selected]");
             }
 
-            sbuf_append(eb->extra, "\n");
+            (void)sbuf_append(eb->extra, "\n");
         }
 
         edit_menu_append_scroll_hint(eb->extra, match_count, display_count, scroll_offset);
     } else {
         scroll_offset = 0;
         if (metadata_filter_applied) {
-            sbuf_appendf(
+            (void)sbuf_appendf(
                 eb->extra,
                 "[ic-info]No history entries matched metadata filters - case %s - sort %s%s[/]\n",
                 session_case_sensitive ? "sensitive" : "insensitive", sort_label, mouse_suffix);
         } else {
-            sbuf_appendf(eb->extra, "[ic-info]No matches found - case %s - sort %s%s[/]\n",
-                         session_case_sensitive ? "sensitive" : "insensitive", sort_label,
-                         mouse_suffix);
+            (void)sbuf_appendf(eb->extra, "[ic-info]No matches found - case %s - sort %s%s[/]\n",
+                               session_case_sensitive ? "sensitive" : "insensitive", sort_label,
+                               mouse_suffix);
+        }
+        if (has_live_input && selected_idx < 0) {
+            history_search_append_empty_selection(env, eb);
         }
     }
 
     if (!env->no_help) {
-        sbuf_append(eb->extra,
-                    "[ic-diminish](↑↓/wheel:navigate shift+↑/↓:page enter:run tab:edit alt+c:case "
-                    "alt+s:sort esc:cancel)[/]");
+        (void)sbuf_append(eb->extra, k_history_menu_footer);
     }
 
     edit_refresh(env, eb);
 
     code_t c = tty_read(env->tty);
     if (tty_term_resize_event(env->tty)) {
-        edit_resize(env, eb);
+        (void)edit_resize(env, eb);
     }
     sbuf_clear(eb->extra);
 
     code_t key_no_mods = KEY_NO_MODS(c);
+    if (edit_menu_mouse_prepare_key(env, eb, c, true, &menu_session.mouse_scroll_enabled,
+                                    &menu_session.mouse_suspended)) {
+        goto again;
+    }
     if (menu_session.mouse_scroll_enabled && key_no_mods == KEY_EVENT_MOUSE_OTHER) {
         bool accept_selection = false;
         if (edit_menu_mouse_select_vertical(env, eb, match_count, scroll_offset, last_display_count,
-                                            1, &selected_idx, &accept_selection)) {
+                                            last_status_rows, &selected_idx, &accept_selection)) {
             if (accept_selection) {
                 c = KEY_TAB;
                 key_no_mods = KEY_TAB;
@@ -1316,6 +1368,10 @@ again:;
                 goto again;
             }
         } else {
+            if (edit_menu_mouse_event_is_left_click(env)) {
+                (void)edit_menu_mouse_suspend(env, eb, &menu_session.mouse_scroll_enabled,
+                                              &menu_session.mouse_suspended);
+            }
             goto again;
         }
     }
@@ -1325,8 +1381,10 @@ again:;
         mem_free(env->mem, matches);
         mem_free(env->mem, session_sort_key);
         edit_menu_finish(env, eb, &menu_session, true, true);
+        eb->modified = original_modified;
         return;
     } else if (c == KEY_ENTER) {
+        const bool restore_live_input = (has_live_input && selected_idx < 0);
         if (match_count > 0 && selected_idx >= 0 && selected_idx < match_count) {
             const history_entry_t* selected =
                 history_snapshot_get(&snap, matches[selected_idx].hidx);
@@ -1342,11 +1400,15 @@ again:;
         history_snapshot_free(env->history, &snap);
         mem_free(env->mem, matches);
         mem_free(env->mem, session_sort_key);
-        edit_menu_finish(env, eb, &menu_session, false, true);
+        edit_menu_finish(env, eb, &menu_session, restore_live_input, true);
+        if (restore_live_input) {
+            eb->modified = original_modified;
+        }
 
         eb->request_submit = true;
         return;
     } else if (c == KEY_TAB) {
+        const bool restore_live_input = (has_live_input && selected_idx < 0);
         if (match_count > 0 && selected_idx >= 0 && selected_idx < match_count) {
             const history_entry_t* selected =
                 history_snapshot_get(&snap, matches[selected_idx].hidx);
@@ -1362,7 +1424,10 @@ again:;
         history_snapshot_free(env->history, &snap);
         mem_free(env->mem, matches);
         mem_free(env->mem, session_sort_key);
-        edit_menu_finish(env, eb, &menu_session, false, true);
+        edit_menu_finish(env, eb, &menu_session, restore_live_input, true);
+        if (restore_live_input) {
+            eb->modified = original_modified;
+        }
         return;
     }
 
@@ -1380,7 +1445,7 @@ again:;
     } else if ((KEY_MODS(c) & KEY_MOD_ALT) && (key_no_mods == 's' || key_no_mods == 'S')) {
         if (history_search_cycle_sort(env, &snap, matches, match_count, &session_sort,
                                       &session_sort_key)) {
-            selected_idx = 0;
+            selected_idx = (has_live_input ? -1 : 0);
             scroll_offset = 0;
         } else {
             term_beep(env->term);
@@ -1388,7 +1453,11 @@ again:;
         goto again;
     } else if (key_no_mods == KEY_UP || c == KEY_CTRL_P ||
                (menu_session.mouse_scroll_enabled && key_no_mods == KEY_EVENT_MOUSE_WHEEL_UP)) {
-        (void)edit_menu_move_selection(env, match_count, -1, &selected_idx);
+        if (has_live_input && selected_idx == 0) {
+            selected_idx = -1;
+        } else {
+            (void)edit_menu_move_selection(env, match_count, -1, &selected_idx);
+        }
         goto again;
     } else if (key_no_mods == KEY_DOWN || c == KEY_CTRL_N ||
                (menu_session.mouse_scroll_enabled && key_no_mods == KEY_EVENT_MOUSE_WHEEL_DOWN)) {
@@ -1397,12 +1466,12 @@ again:;
     } else if (c == KEY_BACKSP) {
         if (eb->pos > 0) {
             edit_backspace(env, eb);
-            selected_idx = 0;
+            selected_idx = (has_live_input ? -1 : 0);
         }
         goto again;
     } else if (c == KEY_DEL) {
         edit_delete_char(env, eb);
-        selected_idx = 0;
+        selected_idx = (has_live_input ? -1 : 0);
         goto again;
     } else if (c == KEY_F1) {
         edit_show_help(env, eb);
@@ -1412,11 +1481,11 @@ again:;
         unicode_t uchr;
         if (code_is_ascii_char(c, &chr)) {
             edit_insert_char(env, eb, chr);
-            selected_idx = 0;
+            selected_idx = (has_live_input ? -1 : 0);
             goto again;
         } else if (code_is_unicode(c, &uchr)) {
             edit_insert_unicode(env, eb, uchr);
-            selected_idx = 0;
+            selected_idx = (has_live_input ? -1 : 0);
             goto again;
         } else {
             term_beep(env->term);
@@ -1425,11 +1494,12 @@ again:;
     }
 }
 
-static void edit_history_search_with_current_word(ic_env_t* env, editor_t* eb) {
+static void edit_history_search_with_current_line(ic_env_t* env, editor_t* eb) {
     char* initial = NULL;
-    const ssize_t input_len = sbuf_len(eb->input);
-    if (input_len > 0) {
-        initial = mem_strndup(eb->mem, sbuf_string(eb->input), input_len);
+    ssize_t line_start = 0;
+    ssize_t line_end = 0;
+    if (edit_get_line_bounds(eb, &line_start, &line_end) && line_end > line_start) {
+        initial = mem_strndup(eb->mem, sbuf_string(eb->input) + line_start, line_end - line_start);
     }
     edit_history_fuzzy_search(env, eb, initial);
     mem_free(env->mem, initial);

@@ -156,18 +156,24 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->no_hint = false;                               // hint (inverted: false = enabled)
     env->complete_autotab = false;                      // auto tab (disabled by default)
     env->no_help = false;                               // inline help (inverted: false = enabled)
-    env->no_multiline_indent = false;     // multiline indent (inverted: false = enabled)
-    env->singleline_only = false;         // multiline (inverted: false = enabled)
-    env->multiline_start_line_count = 1;  // preallocated prompt lines when multiline is on
+    env->no_multiline_indent = false;            // multiline indent (inverted: false = enabled)
+    env->singleline_only = false;                // multiline (inverted: false = enabled)
+    env->retain_multiline_continuation = false;  // remove "\\" when Enter continues by default
+    env->multiline_start_line_count = 1;         // preallocated prompt lines when multiline is on
+    env->multiline_max_line_count = 15;          // visible input rows before viewport scrolling
+    env->multiline_bottom_line_count = 3;        // existing input-row margin around the cursor
     env->last_readline_disposition = IC_READLINE_DISPOSITION_ERROR;
-    env->status_hint_mode = IC_STATUS_HINT_NORMAL;             // default to legacy behavior
-    env->mouse_reporting_mode = IC_MOUSE_CLICKING_DISABLED;    // keep mouse capture off by default
+    env->status_hint_mode = IC_STATUS_HINT_NORMAL;  // default to legacy behavior
+    env->mouse_reporting_mode =
+        IC_MOUSE_CLICKING_MENU_ONLY;  // capture only inside menus by default
     env->history_search_sort = IC_HISTORY_SEARCH_SORT_RECENT;  // newest history entries first
-    env->mouse_reporting_enabled_by_default = false;  // start sessions with mouse capture off
+    env->mouse_reporting_enabled_by_default = false;  // start editing sessions with capture off
     env->mouse_reporting_status_line_enabled = true;  // show indicator line when mouse is active
     env->inline_right_prompt_follows_cursor = false;  // keep right prompt anchored at row 0
     env->bracketed_paste_enabled = false;
-    env->typeahead_enabled = false;  // callers opt in for interactive shell sessions
+    env->typeahead_enabled = false;                // callers opt in for interactive shell sessions
+    env->terminal_region_marking_enabled = false;  // callers opt in to OSC 133 shell integration
+    env->terminal_region_state = 0;
 
     if (env->tty == NULL || env->term == NULL || env->completions == NULL || env->history == NULL ||
         env->bbcode == NULL || env->typeahead_input_buffer == NULL ||

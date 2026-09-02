@@ -107,6 +107,7 @@ struct ic_env_s {
     ic_readline_disposition_t last_readline_disposition;  // disposition from most recent read
     char multiline_eol;                    // character used for multiline input ("\") (set to 0
                                            // to disable)
+    bool retain_multiline_continuation;    // keep multiline_eol when Enter inserts a newline?
     bool initialized;                      // are we initialized?
     bool noedit;                           // is rich editing possible (tty != NULL)
     bool singleline_only;                  // allow only single line editing?
@@ -137,8 +138,12 @@ struct ic_env_s {
     bool inline_right_prompt_follows_cursor;           // right prompt tracks cursor row
     bool bracketed_paste_enabled;                      // bracketed paste mode active
     bool typeahead_enabled;                            // capture pending stdin for next readline
-    size_t multiline_start_line_count;  // prefill multiline prompts with this many lines
-    long hint_delay;                    // delay before displaying a hint in milliseconds
+    bool terminal_region_marking_enabled;              // emit OSC 133 semantic regions
+    uint8_t terminal_region_state;                     // current OSC 133 lifecycle state
+    size_t multiline_start_line_count;   // prefill multiline prompts with this many lines
+    size_t multiline_max_line_count;     // maximum visible input rows in multiline mode
+    size_t multiline_bottom_line_count;  // content-row margin kept around the cursor
+    long hint_delay;                     // delay before displaying a hint in milliseconds
 
     ic_key_binding_entry_t* key_bindings;  // dynamic array of custom key bindings
     ssize_t key_binding_count;

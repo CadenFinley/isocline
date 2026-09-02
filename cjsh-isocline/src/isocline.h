@@ -154,23 +154,70 @@ bool ic_push_key_event(ic_keycode_t key);
 /// Safe to call from a signal handler; triggers a wakeup of the input loop.
 void ic_notify_resize(void);
 
-/// Callback function type for unhandled key events.
-/// This callback is invoked when a key is pressed that is not bound to any
-/// isocline action. The callback receives the keycode and can return true
+/// Callback function type for runoff key events.
+/// This callback is invoked when a key is bound to `IC_KEY_ACTION_RUNOFF`.
+/// The callback receives the keycode and can return true
 /// to indicate the key was handled, or false to let isocline's default
 /// behavior continue.
-/// @param key The keycode that was not handled by isocline
+/// @param key The keycode bound to the runoff action
 /// @param arg User-provided argument passed when setting the callback
 /// @returns true if the key was handled by the callback, false otherwise
 typedef bool(ic_unhandled_key_fun_t)(ic_keycode_t key, void* arg);
 
-/// Set a callback for unhandled key events.
+/// Set a callback for runoff key events.
 /// This allows applications to handle custom keybindings that are not
-/// directly tied to isocline's built-in actions. The callback will be
-/// invoked for any key press that doesn't match an isocline keybinding.
-/// @param callback The callback function to invoke for unhandled keys, or NULL to disable
+/// directly tied to isocline's built-in actions. Bind each custom key to
+/// `IC_KEY_ACTION_RUNOFF` (or the named action `"runoff"`) to invoke it.
+/// @param callback The callback function to invoke for runoff keys, or NULL to disable
 /// @param arg User-provided argument that will be passed to the callback
 void ic_set_unhandled_key_handler(ic_unhandled_key_fun_t* callback, void* arg);
+
+/// An item displayed by ic_show_menu().
+typedef struct ic_menu_item_s {
+    /// Primary text displayed for the item. Must not be NULL or empty.
+    const char* label;
+    /// Optional secondary text displayed after the label and included in searches.
+    const char* description;
+    /// Optional additional searchable text that is not displayed.
+    const char* keywords;
+} ic_menu_item_t;
+
+/// How a selection was accepted from an Isocline custom menu.
+typedef enum ic_menu_accept_e {
+    /// No item was accepted (the menu was cancelled or could not be shown).
+    IC_MENU_ACCEPT_NONE = 0,
+    /// The item was accepted for insertion with Tab or a mouse selection.
+    IC_MENU_ACCEPT_INSERT,
+    /// The item was accepted for immediate submission with Enter.
+    IC_MENU_ACCEPT_SUBMIT,
+} ic_menu_accept_t;
+
+/// Show a searchable selection menu in the active readline editor.
+/// This function is intended to be called synchronously from an unhandled-key
+/// callback after binding a custom key to `IC_KEY_ACTION_RUNOFF`. The current
+/// input and cursor position are restored when the menu closes.
+///
+/// Users can navigate with Up/Down (or Ctrl+P/Ctrl+N), page with Shift+Up/Down,
+/// filter by typing, toggle case sensitivity with Alt+C, accept with Enter or
+/// Tab, and cancel with Escape or Ctrl+C. Mouse selection follows the current
+/// mouse-clicking mode.
+///
+/// The item strings only need to remain valid for the duration of this call.
+/// @param prompt_text Prompt shown while filtering, or NULL for `"select: "`.
+/// @param items Items to display.
+/// @param count Number of items. Must be greater than zero.
+/// @param selected_index Optional destination for the selected original item index.
+/// @returns true when an item was selected; false on cancellation, invalid input,
+///          allocation failure, or when no readline editor is active.
+bool ic_show_menu(const char* prompt_text, const ic_menu_item_t* items, size_t count,
+                  size_t* selected_index);
+
+/// Show a custom menu and report how its selected item was accepted.
+/// This has the same behavior as ic_show_menu(), with `accept` set to
+/// IC_MENU_ACCEPT_INSERT for Tab/mouse, IC_MENU_ACCEPT_SUBMIT for Enter, and
+/// IC_MENU_ACCEPT_NONE when no item was selected.
+bool ic_show_menu_ex(const char* prompt_text, const ic_menu_item_t* items, size_t count,
+                     size_t* selected_index, ic_menu_accept_t* accept);
 
 /// Callback that produces a transient status message below the current input.
 /// The callback runs before each key read while readline is active. The returned
@@ -223,14 +270,20 @@ ic_status_hint_mode_t ic_set_status_hint_mode(ic_status_hint_mode_t mode);
 ic_status_hint_mode_t ic_get_status_hint_mode(void);
 
 /// Mouse capture behavior for readline sessions.
-/// - `IC_MOUSE_CLICKING_DISABLED`: never capture mouse events.
+/// - `IC_MOUSE_CLICKING_DISABLED`: never capture mouse events, including in menus.
 /// - `IC_MOUSE_CLICKING_SIMPLE`: start with mouse capture enabled; only manual toggle changes it.
-/// - `IC_MOUSE_CLICKING_SMART`: start enabled and auto-suspend on wheel/viewport-exit input,
-///   then auto-resume on keyboard/focus-in input.
+/// - `IC_MOUSE_CLICKING_SMART`: start enabled and auto-suspend on wheel input or selection starts
+///   above the editor, in prompt/gutter cells, or in status/helper rows; then auto-resume on
+///   keyboard/focus-in input.
+/// - `IC_MOUSE_CLICKING_MENU_ONLY`: leave editing capture off and acquire it only while an
+///   expanded completion, history, or command-palette menu is open.
+/// While a menu owns mouse capture, clicking outside its selectable items temporarily releases
+/// capture to the terminal. Keyboard input or a terminal focus-in event restores it.
 typedef enum ic_mouse_clicking_mode_e {
     IC_MOUSE_CLICKING_DISABLED = 0,
     IC_MOUSE_CLICKING_SIMPLE,
     IC_MOUSE_CLICKING_SMART,
+    IC_MOUSE_CLICKING_MENU_ONLY,
 } ic_mouse_clicking_mode_t;
 
 /// Set mouse capture mode. Invalid values normalize to `IC_MOUSE_CLICKING_SMART`.
@@ -255,7 +308,8 @@ typedef bool(ic_typeahead_capture_allowed_fun_t)(void* arg);
 
 /// Enable or disable typeahead buffering. Returns the previous enabled state.
 /// When enabled, isocline can capture bytes already queued on stdin and seed
-/// the next readline session with them.
+/// the next readline session with them. A captured carriage return is replayed
+/// as Return (submit), while a captured line feed retains Ctrl+J behavior.
 bool ic_enable_typeahead(bool enable);
 
 /// Returns true when typeahead buffering is enabled.
@@ -312,6 +366,21 @@ bool ic_get_cursor_pos(size_t* out_pos);
 bool ic_set_cursor_pos(size_t pos);
 
 bool ic_request_submit(void);
+
+/// Preserve the current prompt and input as terminal output, then continue the
+/// active readline operation on a fresh copy of the same prompt.
+/// @param new_buffer Buffer for the fresh prompt. Pass NULL for an empty buffer.
+/// @returns true if the editor was advanced, false if no readline operation is active.
+bool ic_current_loop_advance(const char* new_buffer);
+
+/// Like ic_current_loop_advance(), but optionally redraw the prompt being preserved before
+/// advancing. The fresh editable prompt restores the prompt and right prompt that were active
+/// before this call.
+/// @param preserved_prompt Replacement prompt for the preserved input, or NULL to keep it.
+/// @param preserved_inline_right Replacement right prompt for the preserved input, or NULL to
+/// keep it. Pass an empty string to clear it.
+bool ic_current_loop_advance_with_prompt(const char* new_buffer, const char* preserved_prompt,
+                                         const char* preserved_inline_right);
 
 bool ic_current_loop_reset(const char* new_buffer, const char* new_prompt,
                            const char* new_inline_right);
@@ -659,6 +728,12 @@ const char* ic_get_command_palette_prompt(void);
 /// Returns the previous setting.
 bool ic_enable_multiline(bool enable);
 
+/// Configure whether Enter retains the trailing continuation character when it starts a new
+/// multiline input row. When disabled (default), the continuation character is replaced by the
+/// inserted newline. When enabled, the newline is inserted after it so the returned input keeps
+/// the continuation character. Returns the previous setting.
+bool ic_enable_multiline_continuation_retention(bool enable);
+
 /// Disable or enable sound (enabled by default).
 /// A beep is used when tab cannot find any completion for example.
 /// Returns the previous setting.
@@ -761,6 +836,25 @@ size_t ic_set_multiline_start_line_count(size_t line_count);
 
 /// Get the current number of preallocated lines for multiline editing.
 size_t ic_get_multiline_start_line_count(void);
+
+/// Configure the maximum number of input rows shown while editing a multiline command.
+/// The default is 15. When the input needs more rows, the editor scrolls the viewport to keep
+/// the cursor visible. Values below 1 are clamped to 1 and values above 256 are clamped to 256.
+/// Returns the previous configured line count.
+size_t ic_set_multiline_max_line_count(size_t line_count);
+
+/// Get the current maximum number of visible input rows for multiline editing.
+size_t ic_get_multiline_max_line_count(void);
+
+/// Configure the multiline viewport's symmetric cursor margin. The editor retains up to this many
+/// existing input rows below the cursor when moving down and above it when moving up. The default
+/// is 3. Blank rows are never inserted to satisfy the margin. A value of 0 disables the margin,
+/// and values above 256 are clamped to 256.
+/// Returns the previous configured line count.
+size_t ic_set_multiline_bottom_line_count(size_t line_count);
+
+/// Get the preferred number of content rows retained around the multiline cursor.
+size_t ic_get_multiline_bottom_line_count(void);
 
 /// Enable or disable line numbers in multiline input mode. (enabled by default)
 /// When enabled, each line will be prefixed with a line number (e.g., "2| ", "3| ", etc.).
@@ -1183,6 +1277,25 @@ void ic_term_done(void);
 /// Flush the terminal output.
 /// (happens automatically on newline characters ('\n') as well).
 void ic_term_flush(void);
+
+/// Enable or disable OSC 133 semantic marking for prompt, input, and command-output regions.
+/// The option is disabled by default and emits nothing for non-interactive terminals.
+/// Prompt/input boundaries are emitted automatically by readline. The embedding shell should
+/// call ic_mark_command_start() before execution and ic_mark_command_finished() afterward.
+/// Returns the previous setting.
+bool ic_enable_terminal_region_marking(bool enable);
+
+/// Returns whether OSC 133 semantic terminal-region marking is enabled.
+bool ic_terminal_region_marking_is_enabled(void);
+
+/// Mark the end of editable command input and the beginning of command output.
+/// This is a no-op when terminal-region marking is disabled or output is non-interactive.
+void ic_mark_command_start(void);
+
+/// Mark the end of command output and report its exit status.
+/// Exit statuses outside the portable 0-255 range are clamped before emission.
+/// This is a no-op when no semantic input/output region is active.
+void ic_mark_command_finished(int exit_status);
 
 /// Write a string to the console (and process CSI escape sequences).
 void ic_term_write(const char* s);

@@ -8,12 +8,19 @@
 
 typedef struct edit_menu_session_s {
     const char* prompt_text;
+    const char* inline_right_text;
     bool prompt_replacement;
     bool force_prompt_visibility;
+    bool prompt_begins_with_newline;
+    ssize_t prompt_prefix_lines;
     ssize_t line_number_column_width;
+    ssize_t inline_right_width;
     bool old_hint;
     bool old_highlight;
     bool mouse_scroll_enabled;
+    bool mouse_suspended;
+    bool mouse_focus_reporting_added;
+    bool prompt_prefix_hidden;
 } edit_menu_session_t;
 
 typedef struct edit_menu_window_s {
@@ -21,6 +28,90 @@ typedef struct edit_menu_window_s {
     ssize_t max_scroll;
     ssize_t scroll_offset;
 } edit_menu_window_t;
+
+static void edit_menu_mouse_enable_focus_reporting(ic_env_t* env, editor_t* eb, bool mouse_active,
+                                                   bool* added) {
+    if (!mouse_active || eb == NULL || added == NULL || *added ||
+        eb->mouse_focus_reporting_enabled) {
+        return;
+    }
+
+    edit_set_mouse_focus_reporting(env, eb, true);
+    *added = eb->mouse_focus_reporting_enabled;
+}
+
+static bool edit_menu_mouse_suspend(ic_env_t* env, editor_t* eb, bool* scroll_enabled,
+                                    bool* suspended) {
+    if (eb == NULL || scroll_enabled == NULL || suspended == NULL || *suspended ||
+        (!*scroll_enabled && !eb->mouse_reporting_enabled)) {
+        return false;
+    }
+
+    *scroll_enabled = false;
+    if (eb->mouse_reporting_mode == IC_MOUSE_CLICKING_SMART) {
+        edit_set_mouse_auto_suspended(env, eb, true, true);
+    } else {
+        edit_set_mouse_reporting_enabled(env, eb, false);
+    }
+    *suspended = true;
+    return true;
+}
+
+static void edit_menu_mouse_resume(ic_env_t* env, editor_t* eb, bool want_scroll,
+                                   bool* scroll_enabled, bool* suspended) {
+    if (eb == NULL || scroll_enabled == NULL || suspended == NULL || !*suspended) {
+        return;
+    }
+
+    if (eb->mouse_reporting_mode == IC_MOUSE_CLICKING_SMART) {
+        edit_set_mouse_auto_suspended(env, eb, false, false);
+    } else {
+        edit_apply_mouse_reporting_policy(env, eb);
+    }
+    *scroll_enabled = (want_scroll ? edit_enable_menu_mouse_scroll(env) : false);
+    *suspended = false;
+}
+
+static bool edit_menu_mouse_prepare_key(ic_env_t* env, editor_t* eb, code_t key, bool want_scroll,
+                                        bool* scroll_enabled, bool* suspended) {
+    if (eb == NULL || scroll_enabled == NULL || suspended == NULL) {
+        return false;
+    }
+
+    const code_t key_no_mods = KEY_NO_MODS(key);
+    if (key_no_mods == KEY_EVENT_FOCUS_OUT) {
+        (void)edit_menu_mouse_suspend(env, eb, scroll_enabled, suspended);
+        return true;
+    }
+    if (key_no_mods == KEY_EVENT_FOCUS_IN) {
+        edit_menu_mouse_resume(env, eb, want_scroll, scroll_enabled, suspended);
+        return true;
+    }
+    if (*suspended && key_no_mods == KEY_EVENT_MOUSE_OTHER) {
+        return true;
+    }
+    if (*suspended && !edit_key_is_mouse_toggle_binding(env, key) &&
+        edit_mouse_auto_resume_triggered_by_key(key)) {
+        edit_menu_mouse_resume(env, eb, want_scroll, scroll_enabled, suspended);
+    }
+    return false;
+}
+
+static void edit_menu_mouse_finish(ic_env_t* env, editor_t* eb, bool want_scroll,
+                                   bool* scroll_enabled, bool* suspended,
+                                   bool* focus_reporting_added) {
+    if (scroll_enabled == NULL || suspended == NULL || focus_reporting_added == NULL) {
+        return;
+    }
+
+    edit_menu_mouse_resume(env, eb, want_scroll, scroll_enabled, suspended);
+    edit_disable_menu_mouse_scroll(env, *scroll_enabled);
+    *scroll_enabled = false;
+    if (*focus_reporting_added) {
+        edit_set_mouse_focus_reporting(env, eb, false);
+        *focus_reporting_added = false;
+    }
+}
 
 static const char* edit_menu_tag_style(bool selected) {
     return selected ? "ic-menu-selected-secondary" : "ic-diminish";
@@ -30,9 +121,9 @@ static void edit_menu_append_tag_text(stringbuf_t* sb, bool selected, const char
     if (sb == NULL || text == NULL || text[0] == '\0') {
         return;
     }
-    sbuf_appendf(sb, "[%s]", edit_menu_tag_style(selected));
-    sbuf_append(sb, text);
-    sbuf_append(sb, "[/]");
+    (void)sbuf_appendf(sb, "[%s]", edit_menu_tag_style(selected));
+    (void)sbuf_append(sb, text);
+    (void)sbuf_append(sb, "[/]");
 }
 
 static bool edit_menu_should_syntax_highlight_item_ex(const ic_env_t* env, bool selected,
@@ -77,7 +168,7 @@ static int edit_menu_ansi_color_index(ic_color_t color) {
 
 static void edit_menu_append_tag_separator(stringbuf_t* sb, bool* first) {
     if (!*first) {
-        sbuf_append_char(sb, ' ');
+        (void)sbuf_append_char(sb, ' ');
     }
     *first = false;
 }
@@ -96,9 +187,9 @@ static bool edit_menu_append_color_property(stringbuf_t* sb, bool* first, const 
 
     edit_menu_append_tag_separator(sb, first);
     if (ansi_index >= 0) {
-        sbuf_appendf(sb, "%s=%d", ansi_name, ansi_index);
+        (void)sbuf_appendf(sb, "%s=%d", ansi_name, ansi_index);
     } else {
-        sbuf_appendf(sb, "%s=#%06x", rgb_name, (unsigned int)(color & 0xFFFFFFu));
+        (void)sbuf_appendf(sb, "%s=#%06x", rgb_name, (unsigned int)(color & 0xFFFFFFu));
     }
     return true;
 }
@@ -110,22 +201,22 @@ static bool edit_menu_append_attr_open(stringbuf_t* sb, attr_t attr) {
 
     bool first = true;
     ssize_t tag_start = sbuf_len(sb);
-    sbuf_append_char(sb, '[');
+    (void)sbuf_append_char(sb, '[');
     if (attr.x.bold == IC_ON) {
         edit_menu_append_tag_separator(sb, &first);
-        sbuf_append(sb, "b");
+        (void)sbuf_append(sb, "b");
     }
     if (attr.x.italic == IC_ON) {
         edit_menu_append_tag_separator(sb, &first);
-        sbuf_append(sb, "i");
+        (void)sbuf_append(sb, "i");
     }
     if (attr.x.underline == IC_ON) {
         edit_menu_append_tag_separator(sb, &first);
-        sbuf_append(sb, "u");
+        (void)sbuf_append(sb, "u");
     }
     if (attr.x.reverse == IC_ON) {
         edit_menu_append_tag_separator(sb, &first);
-        sbuf_append(sb, "r");
+        (void)sbuf_append(sb, "r");
     }
     (void)edit_menu_append_color_property(sb, &first, "color", "ansi-color", attr.x.color);
     (void)edit_menu_append_color_property(sb, &first, "bgcolor", "ansi-bgcolor", attr.x.bgcolor);
@@ -136,7 +227,7 @@ static bool edit_menu_append_attr_open(stringbuf_t* sb, attr_t attr) {
         sbuf_delete_from(sb, tag_start);
         return false;
     }
-    sbuf_append_char(sb, ']');
+    (void)sbuf_append_char(sb, ']');
     return true;
 }
 
@@ -151,14 +242,14 @@ static void edit_menu_append_escaped_n(stringbuf_t* sb, const char* text, ssize_
             continue;
         }
         if (i > segment_start) {
-            sbuf_append_n(sb, text + segment_start, i - segment_start);
+            (void)sbuf_append_n(sb, text + segment_start, i - segment_start);
         }
-        sbuf_append_char(sb, '\\');
-        sbuf_append_char(sb, text[i]);
+        (void)sbuf_append_char(sb, '\\');
+        (void)sbuf_append_char(sb, text[i]);
         segment_start = i + 1;
     }
     if (segment_start < len) {
-        sbuf_append_n(sb, text + segment_start, len - segment_start);
+        (void)sbuf_append_n(sb, text + segment_start, len - segment_start);
     }
 }
 
@@ -198,12 +289,12 @@ static void edit_menu_append_attr_slice(stringbuf_t* sb, const char* text, ssize
         ssize_t line_break_advance = 0;
         if (edit_menu_is_line_break_at(text, len, pos, &line_break_advance)) {
             if (underline_open) {
-                sbuf_append(sb, "[/u]");
+                (void)sbuf_append(sb, "[/u]");
                 underline_open = false;
             }
-            sbuf_append_char(sb, '\n');
+            (void)sbuf_append_char(sb, '\n');
             if (newline_indent != NULL) {
-                sbuf_append(sb, newline_indent);
+                (void)sbuf_append(sb, newline_indent);
             }
             pos += line_break_advance;
             continue;
@@ -213,11 +304,11 @@ static void edit_menu_append_attr_slice(stringbuf_t* sb, const char* text, ssize
             (underline_start >= 0 && pos >= underline_start && pos < underline_end);
         if (should_underline != underline_open) {
             if (underline_open) {
-                sbuf_append(sb, "[/u]");
+                (void)sbuf_append(sb, "[/u]");
             } else if (selected) {
-                sbuf_append(sb, "[u]");
+                (void)sbuf_append(sb, "[u]");
             } else {
-                sbuf_append(sb, "[u ic-emphasis]");
+                (void)sbuf_append(sb, "[u ic-emphasis]");
             }
             underline_open = should_underline;
         }
@@ -240,13 +331,13 @@ static void edit_menu_append_attr_slice(stringbuf_t* sb, const char* text, ssize
         bool attr_open = edit_menu_append_attr_open(sb, attr);
         edit_menu_append_escaped_n(sb, text + pos, run_end - pos);
         if (attr_open) {
-            sbuf_append(sb, "[/]");
+            (void)sbuf_append(sb, "[/]");
         }
         pos = run_end;
     }
 
     if (underline_open) {
-        sbuf_append(sb, "[/u]");
+        (void)sbuf_append(sb, "[/u]");
     }
 }
 
@@ -407,11 +498,11 @@ static bool edit_menu_append_completion_syntax_highlighted_text(
         replacement_start = input_len;
     }
 
-    sbuf_append_n(accepted, input, replacement_start);
+    (void)sbuf_append_n(accepted, input, replacement_start);
     const ssize_t attr_start = sbuf_len(accepted);
-    sbuf_append(accepted, replacement);
+    (void)sbuf_append(accepted, replacement);
     if (suffix_start < input_len) {
-        sbuf_append_n(accepted, input + suffix_start, input_len - suffix_start);
+        (void)sbuf_append_n(accepted, input + suffix_start, input_len - suffix_start);
     }
 
     const ssize_t accepted_len = sbuf_len(accepted);
@@ -444,16 +535,36 @@ static edit_menu_session_t edit_menu_begin(ic_env_t* env, editor_t* eb, const ch
     eb->disable_undo = true;
     session.old_hint = ic_enable_hint(false);
     session.old_highlight = ic_enable_highlight(true);
-    ic_enable_highlight(session.old_highlight);
+    (void)ic_enable_highlight(session.old_highlight);
     session.prompt_text = eb->prompt_text;
+    session.inline_right_text = eb->inline_right_text;
     session.prompt_replacement = eb->replace_prompt_line_with_number;
     session.force_prompt_visibility = eb->force_prompt_text_visible;
+    session.prompt_begins_with_newline = eb->prompt_begins_with_newline;
+    session.prompt_prefix_lines = eb->prompt_prefix_lines;
     session.line_number_column_width = eb->line_number_column_width;
+    session.inline_right_width = eb->inline_right_width;
+    session.prompt_prefix_hidden = (eb->prompt_prefix_lines > 0);
+    if (session.prompt_prefix_hidden) {
+        edit_clear_with_prompt_prefix(env, eb, eb->prompt_prefix_lines);
+        eb->prompt_prefix_lines = 0;
+        eb->prompt_begins_with_newline = false;
+        eb->cur_rows = 1;
+        eb->input_rows = 1;
+        eb->cur_row = 0;
+        eb->view_first_row = 0;
+        eb->view_rows = 1;
+        eb->view_input_rows = 1;
+    }
     eb->force_prompt_text_visible = true;
     eb->replace_prompt_line_with_number = false;
     eb->prompt_text = prompt_text;
+    eb->inline_right_text = NULL;
+    eb->inline_right_width = 0;
     session.mouse_scroll_enabled =
         (enable_mouse_scroll ? edit_enable_menu_mouse_scroll(env) : false);
+    edit_menu_mouse_enable_focus_reporting(env, eb, session.mouse_scroll_enabled,
+                                           &session.mouse_focus_reporting_added);
     return session;
 }
 
@@ -468,15 +579,33 @@ static void edit_menu_finish(ic_env_t* env, editor_t* eb, edit_menu_session_t* s
     if (restore_undo) {
         editor_undo_restore(eb, false);
     }
+
+    if (session->prompt_prefix_hidden) {
+        edit_clear_with_prompt_prefix(env, eb, 0);
+        eb->cur_rows = 1;
+        eb->input_rows = 1;
+        eb->cur_row = 0;
+        eb->view_first_row = 0;
+        eb->view_rows = 1;
+        eb->view_input_rows = 1;
+    }
+
     eb->prompt_text = session->prompt_text;
+    eb->inline_right_text = session->inline_right_text;
     eb->replace_prompt_line_with_number = session->prompt_replacement;
     eb->force_prompt_text_visible = session->force_prompt_visibility;
+    eb->prompt_begins_with_newline = session->prompt_begins_with_newline;
+    eb->prompt_prefix_lines = session->prompt_prefix_lines;
     eb->line_number_column_width = session->line_number_column_width;
-    ic_enable_hint(session->old_hint);
-    ic_enable_highlight(session->old_highlight);
-    edit_disable_menu_mouse_scroll(env, session->mouse_scroll_enabled);
-    session->mouse_scroll_enabled = false;
-    if (refresh) {
+    eb->inline_right_width = session->inline_right_width;
+    (void)ic_enable_hint(session->old_hint);
+    (void)ic_enable_highlight(session->old_highlight);
+    edit_menu_mouse_finish(env, eb, true, &session->mouse_scroll_enabled, &session->mouse_suspended,
+                           &session->mouse_focus_reporting_added);
+    if (session->prompt_prefix_hidden) {
+        redraw_prompt_prefix_lines(env, eb);
+    }
+    if (refresh || session->prompt_prefix_hidden) {
         edit_refresh(env, eb);
     }
 }
@@ -502,7 +631,7 @@ static ssize_t edit_menu_input_rows(ic_env_t* env, editor_t* eb) {
     if (input_rows <= 0) {
         input_rows = 1;
     }
-    return input_rows;
+    return edit_visible_input_row_count(env, eb, input_rows);
 }
 
 static ssize_t edit_menu_available_lines(ic_env_t* env, editor_t* eb, ssize_t reserved_rows,
@@ -519,6 +648,28 @@ static ssize_t edit_menu_available_lines(ic_env_t* env, editor_t* eb, ssize_t re
         available_lines = min_lines;
     }
     return available_lines;
+}
+
+static ssize_t edit_menu_rendered_rows(ic_env_t* env, editor_t* eb, const char* text) {
+    if (env == NULL || eb == NULL || text == NULL || text[0] == '\0') {
+        return 0;
+    }
+
+    stringbuf_t* rendered = sbuf_new(env->mem);
+    if (rendered == NULL) {
+        return 1;
+    }
+
+    bbcode_append(env->bbcode, text, rendered, NULL);
+    rowcol_t rc_dummy;
+    memset(&rc_dummy, 0, sizeof(rc_dummy));
+    ssize_t rows = sbuf_get_rc_at_pos(rendered, term_get_width(env->term), 0, 0, sbuf_len(rendered),
+                                      &rc_dummy);
+    if (sbuf_ends_with_newline(rendered) && rows > 0) {
+        rows--;
+    }
+    sbuf_free(rendered);
+    return (rows > 0 ? rows : 1);
 }
 
 static edit_menu_window_t edit_menu_window_for(ssize_t item_count, ssize_t requested_rows,
@@ -670,17 +821,17 @@ static void edit_menu_append_multiline_preview(ic_env_t* env, editor_t* eb, cons
 
     const char* arrow = (tty_is_utf8(env->tty) ? "\xE2\x86\x92" : ">");
     if (syntax_highlight) {
-        sbuf_append(eb->extra, "[ic-menu-selected][!pre]");
-        sbuf_appendf(eb->extra, "%s ", arrow);
-        sbuf_append(eb->extra, "[/pre]");
+        (void)sbuf_append(eb->extra, "[ic-menu-selected][!pre]");
+        (void)sbuf_appendf(eb->extra, "%s ", arrow);
+        (void)sbuf_append(eb->extra, "[/pre]");
         edit_menu_append_syntax_highlighted_text(env, eb->extra, display, -1, parse_bbcode, -1, 0,
                                                  true, false, "  ");
-        sbuf_append(eb->extra, "[/ic-menu-selected]");
+        (void)sbuf_append(eb->extra, "[/ic-menu-selected]");
         return;
     }
 
-    sbuf_append(eb->extra, "[ic-menu-selected][!pre]");
-    sbuf_appendf(eb->extra, "%s ", arrow);
+    (void)sbuf_append(eb->extra, "[ic-menu-selected][!pre]");
+    (void)sbuf_appendf(eb->extra, "%s ", arrow);
 
     const char* segment = display;
     for (const char* p = display; *p != '\0'; ++p) {
@@ -689,10 +840,10 @@ static void edit_menu_append_multiline_preview(ic_env_t* env, editor_t* eb, cons
         }
 
         if (p > segment) {
-            sbuf_append_n(eb->extra, segment, p - segment);
+            (void)sbuf_append_n(eb->extra, segment, p - segment);
         }
 
-        sbuf_append(eb->extra, "\n  ");
+        (void)sbuf_append(eb->extra, "\n  ");
         if (*p == '\r' && p[1] == '\n') {
             ++p;
         }
@@ -700,10 +851,10 @@ static void edit_menu_append_multiline_preview(ic_env_t* env, editor_t* eb, cons
     }
 
     if (*segment != '\0') {
-        sbuf_append(eb->extra, segment);
+        (void)sbuf_append(eb->extra, segment);
     }
 
-    sbuf_append(eb->extra, "[/pre][/ic-menu-selected]");
+    (void)sbuf_append(eb->extra, "[/pre][/ic-menu-selected]");
 }
 
 static ssize_t edit_menu_visible_prefix(const char* s, ssize_t len, ssize_t max_columns,
@@ -765,7 +916,7 @@ static void edit_menu_append_highlighted_prefix(stringbuf_t* sb, const char* dis
         if (match_pos < visible_len) {
             if (match_pos > 0) {
                 ssize_t prefix_len = (match_pos <= visible_len ? match_pos : visible_len);
-                sbuf_append_n(sb, display, prefix_len);
+                (void)sbuf_append_n(sb, display, prefix_len);
             }
 
             if (match_len > 0) {
@@ -779,23 +930,23 @@ static void edit_menu_append_highlighted_prefix(stringbuf_t* sb, const char* dis
 
             if (match_len > 0) {
                 if (selected) {
-                    sbuf_append(sb, "[/pre][u][!pre]");
+                    (void)sbuf_append(sb, "[/pre][u][!pre]");
                 } else {
-                    sbuf_append(sb, "[/pre][u ic-emphasis][!pre]");
+                    (void)sbuf_append(sb, "[/pre][u ic-emphasis][!pre]");
                 }
-                sbuf_append_n(sb, display + match_pos, match_len);
-                sbuf_append(sb, "[/pre][/u][!pre]");
+                (void)sbuf_append_n(sb, display + match_pos, match_len);
+                (void)sbuf_append(sb, "[/pre][/u][!pre]");
             }
 
             ssize_t suffix_start = match_pos + match_len;
             if (suffix_start < visible_len) {
-                sbuf_append_n(sb, display + suffix_start, visible_len - suffix_start);
+                (void)sbuf_append_n(sb, display + suffix_start, visible_len - suffix_start);
             }
             return;
         }
     }
 
-    sbuf_append_n(sb, display, visible_len);
+    (void)sbuf_append_n(sb, display, visible_len);
 }
 
 static void edit_menu_append_scroll_hint(stringbuf_t* sb, ssize_t item_count, ssize_t display_count,
@@ -807,11 +958,12 @@ static void edit_menu_append_scroll_hint(stringbuf_t* sb, ssize_t item_count, ss
     ssize_t hidden_above = scroll_offset;
     ssize_t hidden_below = item_count - (scroll_offset + display_count);
     if (hidden_above > 0 && hidden_below > 0) {
-        sbuf_appendf(sb, "[ic-info]  (%zd above, %zd below)[/]\n", hidden_above, hidden_below);
+        (void)sbuf_appendf(sb, "[ic-info]  (%zd above, %zd below)[/]\n", hidden_above,
+                           hidden_below);
     } else if (hidden_above > 0) {
-        sbuf_appendf(sb, "[ic-info]  (%zd more above)[/]\n", hidden_above);
+        (void)sbuf_appendf(sb, "[ic-info]  (%zd more above)[/]\n", hidden_above);
     } else if (hidden_below > 0) {
-        sbuf_appendf(sb, "[ic-info]  (%zd more below)[/]\n", hidden_below);
+        (void)sbuf_appendf(sb, "[ic-info]  (%zd more below)[/]\n", hidden_below);
     }
 }
 
@@ -847,7 +999,7 @@ static bool edit_menu_mouse_select_vertical(ic_env_t* env, editor_t* eb, ssize_t
     }
     ic_unused(target_col);
 
-    const ssize_t input_rows = edit_menu_input_rows(env, eb);
+    const ssize_t input_rows = (eb->input_rows > 0 ? eb->input_rows : 1);
     const ssize_t items_first_row = input_rows + status_rows;
     const ssize_t item_row = target_row - items_first_row;
     if (item_row < 0 || item_row >= display_count) {
@@ -862,4 +1014,17 @@ static bool edit_menu_mouse_select_vertical(ic_env_t* env, editor_t* eb, ssize_t
     *selected_idx = idx;
     *accept_selection = (mouse_event.action == TTY_MOUSE_ACTION_LEFT_RELEASE);
     return true;
+}
+
+static bool edit_menu_mouse_event_is_left_click(ic_env_t* env) {
+    if (env == NULL || env->tty == NULL) {
+        return false;
+    }
+
+    tty_mouse_event_t mouse_event;
+    if (!tty_get_last_mouse_event(env->tty, &mouse_event)) {
+        return false;
+    }
+    return (mouse_event.action == TTY_MOUSE_ACTION_LEFT_PRESS ||
+            mouse_event.action == TTY_MOUSE_ACTION_LEFT_RELEASE);
 }

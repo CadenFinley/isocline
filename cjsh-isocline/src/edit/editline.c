@@ -45,6 +45,7 @@
 
 #include "common.h"
 #include "completions.h"
+#include "editline_viewport.h"
 #include "env.h"
 #include "env_internal.h"
 #include "fuzzy_match.h"
@@ -70,11 +71,13 @@ typedef struct editor_s {
     stringbuf_t* hint_help;       // help for a hint.
     stringbuf_t* history_prefix;  // cached prefix before history navigation
     ssize_t pos;                  // current cursor position in the input
-    ssize_t cur_rows;             // current used rows to display our content (including
-                                  // extra content)
-    ssize_t cur_row;              // current row that has the cursor (0 based, relative to
+    ssize_t cur_rows;             // total logical rows for input and extra content
+    ssize_t input_rows;           // logical prompt/input rows before status/help content
+    ssize_t cur_row;              // logical row that has the cursor (0 based, relative to
                                   // the prompt)
-    ssize_t view_first_row;       // first visible row in the current viewport
+    ssize_t view_first_row;       // first logical input row in the current viewport
+    ssize_t view_rows;            // total rows physically rendered in the current viewport
+    ssize_t view_input_rows;      // physically rendered prompt/input rows in the viewport
     ssize_t termw;
     bool modified;                      // has a modification happened? (used for history navigation
                                         // for example)
@@ -106,12 +109,14 @@ typedef struct editor_s {
     ssize_t last_screen_cursor_col;    // cached absolute cursor col from the last successful query
     bool last_screen_cursor_known;     // whether absolute cursor position cache is valid
     ic_mouse_clicking_mode_t mouse_reporting_mode;  // per-session mouse capture strategy
-    bool mouse_reporting_enabled;         // whether terminal mouse capture is currently on
-    bool mouse_reporting_manual_enabled;  // user/default preference for this session
-    bool mouse_reporting_auto_suspended;  // smart mode auto-disabled mouse capture
-    bool mouse_focus_reporting_enabled;   // focus-in/focus-out reporting (CSI I/O) enabled
-    ssize_t mouse_capture_depth;          // nested mouse tracking enablement depth
-    alloc_t* mem;                         // allocator
+    bool mouse_reporting_enabled;             // whether terminal mouse capture is currently on
+    bool mouse_reporting_manual_enabled;      // user/default preference for this session
+    bool mouse_reporting_auto_suspended;      // smart mode auto-disabled mouse capture
+    bool mouse_terminal_selection_extra;      // rendered extra rows should select in the terminal
+    bool mouse_terminal_selection_suspended;  // preserve display while terminal selection is active
+    bool mouse_focus_reporting_enabled;       // focus-in/focus-out reporting (CSI I/O) enabled
+    ssize_t mouse_capture_depth;              // nested mouse tracking enablement depth
+    alloc_t* mem;                             // allocator
     // caches
     attrbuf_t* attrs;  // reuse attribute buffers
     attrbuf_t* attrs_extra;
@@ -158,13 +163,14 @@ static bool edit_completion_click_accept_enabled(const ic_env_t* env) {
 }
 
 static void edit_generate_completions(ic_env_t* env, editor_t* eb, bool autotab);
-static void edit_history_search_with_current_word(ic_env_t* env, editor_t* eb);
+static void edit_history_search_with_current_line(ic_env_t* env, editor_t* eb);
 static void edit_command_palette(ic_env_t* env, editor_t* eb);
 static void edit_history_prev(ic_env_t* env, editor_t* eb);
 static void edit_history_next(ic_env_t* env, editor_t* eb);
 static void edit_yank_last_arg(ic_env_t* env, editor_t* eb);
 static void edit_clear_history_preview(editor_t* eb);
 static void edit_clear(ic_env_t* env, editor_t* eb);
+static void edit_clear_with_prompt_prefix(ic_env_t* env, editor_t* eb, ssize_t prompt_prefix_lines);
 static void edit_clear_screen(ic_env_t* env, editor_t* eb);
 static void edit_undo_restore(ic_env_t* env, editor_t* eb);
 static void edit_redo_restore(ic_env_t* env, editor_t* eb);
@@ -226,7 +232,7 @@ static bool key_action_execute(ic_env_t* env, editor_t* eb, ic_key_action_t acti
             edit_generate_completions(env, eb, false);
             return true;
         case IC_KEY_ACTION_HISTORY_SEARCH:
-            edit_history_search_with_current_word(env, eb);
+            edit_history_search_with_current_line(env, eb);
             return true;
         case IC_KEY_ACTION_COMMAND_PALETTE:
             edit_command_palette(env, eb);
@@ -421,7 +427,7 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb);
 
 ic_private char* ic_editline(ic_env_t* env, const char* prompt_text,
                              const char* inline_right_text) {
-    tty_start_raw(env->tty);
+    (void)tty_start_raw(env->tty);
     term_start_raw(env->term);
     char* line = edit_line(env, prompt_text, inline_right_text);
     term_end_raw(env->term, false);
@@ -453,7 +459,7 @@ static void editor_undo_forget(editor_t* eb) {
         return;
     const char* input = NULL;
     ssize_t pos = 0;
-    editstate_restore(eb->mem, &eb->undo, &input, &pos);
+    (void)editstate_restore(eb->mem, &eb->undo, &input, &pos);
     mem_free(eb->mem, input);
 }
 
@@ -583,6 +589,24 @@ static ssize_t edit_get_rowcol(ic_env_t* env, editor_t* eb, rowcol_t* rc) {
     return sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw, eb->pos, rc);
 }
 
+static ssize_t edit_visible_input_row_count(ic_env_t* env, editor_t* eb, ssize_t input_rows) {
+    if (env == NULL || input_rows < 1) {
+        return 1;
+    }
+
+    ssize_t available_rows = term_get_height(env->term);
+    if (eb != NULL && eb->prompt_prefix_lines > 0) {
+        available_rows -= eb->prompt_prefix_lines;
+    }
+    if (available_rows < 1) {
+        available_rows = 1;
+    }
+
+    return editline_viewport_for(input_rows, 0, input_rows - 1, available_rows,
+                                 env->multiline_max_line_count, env->multiline_bottom_line_count, 0)
+        .input_row_count;
+}
+
 static void edit_set_pos_at_rowcol(ic_env_t* env, editor_t* eb, ssize_t row, ssize_t col) {
     ssize_t promptw, cpromptw;
     edit_get_prompt_width(env, eb, false, &promptw, &cpromptw);
@@ -591,6 +615,34 @@ static void edit_set_pos_at_rowcol(ic_env_t* env, editor_t* eb, ssize_t row, ssi
         return;
     eb->pos = pos;
     edit_refresh_hint(env, eb);
+}
+
+static ssize_t edit_view_cursor_row(const editor_t* eb) {
+    if (eb == NULL || eb->view_rows <= 0) {
+        return 0;
+    }
+
+    ssize_t cursor_row = eb->cur_row - eb->view_first_row;
+    if (cursor_row < 0) {
+        cursor_row = 0;
+    } else if (cursor_row >= eb->view_input_rows) {
+        cursor_row = (eb->view_input_rows > 0 ? eb->view_input_rows - 1 : 0);
+    }
+    return cursor_row;
+}
+
+static bool edit_view_row_to_logical_row(const editor_t* eb, ssize_t view_row,
+                                         ssize_t* logical_row) {
+    if (eb == NULL || logical_row == NULL || view_row < 0 || view_row >= eb->view_rows) {
+        return false;
+    }
+
+    if (view_row < eb->view_input_rows) {
+        *logical_row = eb->view_first_row + view_row;
+    } else {
+        *logical_row = eb->input_rows + (view_row - eb->view_input_rows);
+    }
+    return (*logical_row >= 0 && *logical_row < eb->cur_rows);
 }
 
 static bool edit_mouse_event_to_target_rowcol(ic_env_t* env, editor_t* eb,
@@ -624,8 +676,9 @@ static bool edit_mouse_event_to_target_rowcol(ic_env_t* env, editor_t* eb,
     }
 
     if (!has_cursor_pos) {
-        ssize_t fallback_row = mouse_event->row - 1;
-        if (fallback_row < 0 || fallback_row >= eb->cur_rows) {
+        const ssize_t fallback_view_row = mouse_event->row - 1;
+        ssize_t fallback_row = 0;
+        if (!edit_view_row_to_logical_row(eb, fallback_view_row, &fallback_row)) {
             return false;
         }
 
@@ -640,10 +693,7 @@ static bool edit_mouse_event_to_target_rowcol(ic_env_t* env, editor_t* eb,
     }
     ic_unused(cursor_col);
 
-    ssize_t visible_cursor_row = eb->cur_row - eb->view_first_row;
-    if (visible_cursor_row < 0) {
-        visible_cursor_row = 0;
-    }
+    const ssize_t visible_cursor_row = edit_view_cursor_row(eb);
 
     ssize_t top_row = cursor_row - visible_cursor_row;
     ssize_t clicked_visible_row = mouse_event->row - top_row;
@@ -654,8 +704,8 @@ static bool edit_mouse_event_to_target_rowcol(ic_env_t* env, editor_t* eb,
         return false;
     }
 
-    ssize_t row = eb->view_first_row + clicked_visible_row;
-    if (row < 0 || row >= eb->cur_rows) {
+    ssize_t row = 0;
+    if (!edit_view_row_to_logical_row(eb, clicked_visible_row, &row)) {
         return false;
     }
 
@@ -715,7 +765,7 @@ static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb, const char* ren
             sbuf_replace(display_input_with_hint, sbuf_string(eb->input));
             display_hint_len = ic_strlen(active_hint);
             if (display_hint_len > 0) {
-                sbuf_insert_at(display_input_with_hint, active_hint, display_hint_insert_pos);
+                (void)sbuf_insert_at(display_input_with_hint, active_hint, display_hint_insert_pos);
                 display_input = display_input_with_hint;
             } else {
                 display_hint_len = 0;
@@ -797,7 +847,7 @@ static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb, const char* ren
 
 static bool edit_pos_is_at_row_end(ic_env_t* env, editor_t* eb) {
     rowcol_t rc;
-    edit_get_rowcol(env, eb, &rc);
+    (void)edit_get_rowcol(env, eb, &rc);
     return rc.last_on_row;
 }
 
@@ -1076,7 +1126,9 @@ static ssize_t print_prompt_prefix_lines(ic_env_t* env, editor_t* eb, const char
     eb->prompt_prefix_text = prefix;
 
     // Print the prefix lines directly to the terminal
+    ic_term_mark_prompt_start(env, false);
     bbcode_print(env->bbcode, prefix);
+    ic_term_mark_input_start(env);
 
     // Count how many lines we emitted (number of newline characters)
     ssize_t lines = 0;
@@ -1095,7 +1147,9 @@ static void redraw_prompt_prefix_lines(ic_env_t* env, editor_t* eb) {
     if (eb->prompt_prefix_text == NULL || eb->prompt_prefix_lines <= 0)
         return;
     term_start_of_line(env->term);
+    ic_term_mark_prompt_start(env, false);
     bbcode_print(env->bbcode, eb->prompt_prefix_text);
+    ic_term_mark_input_start(env);
 }
 
 static void format_line_number_prompt(char* buffer, size_t buffer_size, ssize_t row,
@@ -1124,6 +1178,7 @@ static void edit_write_prompt(ic_env_t* env, editor_t* eb, ssize_t row, bool in_
                               bool is_continuation_row) {
     if (in_extra)
         return;
+    ic_term_mark_prompt_start(env, row > 0 || is_continuation_row);
     const bool line_numbers_active = line_numbers_enabled(env);
     const bool row_uses_prompt_text = (row == 0 && !eb->replace_prompt_line_with_number);
     const bool row_uses_line_numbers =
@@ -1184,6 +1239,7 @@ static void edit_write_prompt(ic_env_t* env, editor_t* eb, ssize_t row, bool in_
         bbcode_print(env->bbcode, (row == 0 ? env->prompt_marker : env->cprompt_marker));
     }
     bbcode_style_close(env->bbcode, NULL);
+    ic_term_mark_input_start(env);
 }
 
 static ssize_t edit_decode_codepoint(const char* text, ssize_t len, ssize_t offset,
@@ -1345,6 +1401,7 @@ typedef struct refresh_info_s {
     ssize_t logical_line;
     ssize_t cursor_logical_line;
     bool continuation_row;
+    bool has_following_row;
 } refresh_info_t;
 
 static void edit_render_inline_right_prompt(refresh_info_t* info, ssize_t row, ssize_t row_len) {
@@ -1379,6 +1436,7 @@ static void edit_render_inline_right_prompt(refresh_info_t* info, ssize_t row, s
         spaces_needed = 1;
     }
 
+    ic_term_mark_prompt_start(info->env, row > 0);
     term_write_repeat(info->env->term, " ", spaces_needed);
 
     const char* text_to_write = info->eb->inline_right_text;
@@ -1398,6 +1456,7 @@ static void edit_render_inline_right_prompt(refresh_info_t* info, ssize_t row, s
         bbcode_print(info->env->bbcode, text_to_write);
     }
 
+    ic_term_mark_input_start(info->env);
     term_flush(info->env->term);
 }
 
@@ -1446,8 +1505,9 @@ static bool edit_refresh_rows_iter(const char* s, ssize_t row, ssize_t row_start
         }
 
         // write line ending
-        if (row < info->last_row) {
+        if (row < info->last_row || info->has_following_row) {
             if (is_wrap && tty_is_utf8(info->env->tty)) {
+                ic_term_mark_prompt_start(info->env, true);
 #ifndef __APPLE__
                 bbcode_print(info->env->bbcode,
                              "[ic-diminish]\xE2\x86\x90[/]");  // left arrow
@@ -1455,6 +1515,7 @@ static bool edit_refresh_rows_iter(const char* s, ssize_t row, ssize_t row_start
                 bbcode_print(info->env->bbcode,
                              "[ic-diminish]\xE2\x86\xB5[/]");  // return symbol
 #endif
+                ic_term_mark_input_start(info->env);
             }
             if (!should_attempt_inline_right) {
                 term_clear_to_end_of_line(term);
@@ -1481,7 +1542,8 @@ static bool edit_refresh_rows_iter(const char* s, ssize_t row, ssize_t row_start
 
 static void edit_refresh_rows(ic_env_t* env, editor_t* eb, stringbuf_t* input, attrbuf_t* attrs,
                               ssize_t promptw, ssize_t cpromptw, bool in_extra, ssize_t first_row,
-                              ssize_t last_row, ssize_t cursor_row, ssize_t cursor_logical_line) {
+                              ssize_t last_row, bool has_following_row, ssize_t cursor_row,
+                              ssize_t cursor_logical_line) {
     if (input == NULL)
         return;
     refresh_info_t info;
@@ -1495,7 +1557,9 @@ static void edit_refresh_rows(ic_env_t* env, editor_t* eb, stringbuf_t* input, a
     info.logical_line = 0;
     info.cursor_logical_line = cursor_logical_line;
     info.continuation_row = false;
-    sbuf_for_each_row(input, eb->termw, promptw, cpromptw, &edit_refresh_rows_iter, &info, NULL);
+    info.has_following_row = has_following_row;
+    (void)sbuf_for_each_row(input, eb->termw, promptw, cpromptw, &edit_refresh_rows_iter, &info,
+                            NULL);
 }
 
 static bool sbuf_ends_with_newline(stringbuf_t* sbuf) {
@@ -1584,7 +1648,7 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
             attrbuf_insert_at(eb->attrs, eb->pos, sbuf_len(eb->hint),
                               bbcode_style(env->bbcode, "ic-hint"));
         }
-        sbuf_insert_at(eb->input, sbuf_string(eb->hint), eb->pos);
+        (void)sbuf_insert_at(eb->input, sbuf_string(eb->hint), eb->pos);
     }
 
     // render extra (like a completion menu) and status message
@@ -1690,41 +1754,43 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
         }
     }
 
-    ssize_t first_row = 0;        // first visible row
-    ssize_t last_row = rows - 1;  // last visible row
-    if (rows > visible_termh) {
-        first_row = rc.row - visible_termh + 1;  // ensure cursor is visible
-        if (first_row < 0)
-            first_row = 0;
-        last_row = first_row + visible_termh - 1;
-    }
-    assert(last_row - first_row < visible_termh);
+    const editline_viewport_t viewport = editline_viewport_for(
+        rows_input, rows_extra, rc.row, visible_termh, env->multiline_max_line_count,
+        env->multiline_bottom_line_count, eb->view_first_row);
+    const ssize_t first_input_row = viewport.input_first_row;
+    const ssize_t last_input_row = first_input_row + viewport.input_row_count - 1;
+    const ssize_t view_rows = viewport.input_row_count + viewport.extra_row_count;
+    const ssize_t visible_cursor_row = rc.row - first_input_row;
+    assert(viewport.input_row_count >= 1);
+    assert(visible_cursor_row >= 0 && visible_cursor_row < viewport.input_row_count);
+    assert(view_rows >= 1 && view_rows <= visible_termh);
 
     // reduce flicker
     buffer_mode_t bmode = term_set_buffer_mode(env->term, BUFFERED);
 
-    // back up to the first line
+    // Back up from the cursor's physical row in the previous viewport. Logical row counts can be
+    // much larger than the number of rows currently present on screen.
+    const ssize_t previous_visible_cursor_row = edit_view_cursor_row(eb);
     term_start_of_line(env->term);
-    term_up(env->term, (eb->cur_row >= visible_termh ? visible_termh - 1 : eb->cur_row));
+    term_up(env->term, previous_visible_cursor_row);
     // term_clear_lines_to_end(env->term);  // gives flicker in old Windows cmd
     // prompt
 
-    // render rows
-    edit_refresh_rows(env, eb, eb->input, eb->attrs, promptw, cpromptw, false, first_row, last_row,
-                      cursor_row_for_display, cursor_line_for_display);
-    if (rows_extra > 0) {
+    // Render the input viewport and then any helper/menu rows. These regions are intentionally
+    // non-contiguous in the logical layout when input rows above or below the cursor are hidden.
+    edit_refresh_rows(env, eb, eb->input, eb->attrs, promptw, cpromptw, false, first_input_row,
+                      last_input_row, viewport.extra_row_count > 0, cursor_row_for_display,
+                      cursor_line_for_display);
+    if (viewport.extra_row_count > 0) {
         assert(extra != NULL);
-        const ssize_t first_rowx = (first_row > rows_input ? first_row - rows_input : 0);
-        const ssize_t last_rowx = last_row - rows_input;
-        assert(last_rowx >= 0);
-        edit_refresh_rows(env, eb, extra, eb->attrs_extra, 0, 0, true, first_rowx, last_rowx,
-                          cursor_row_for_display, -1);
+        edit_refresh_rows(env, eb, extra, eb->attrs_extra, 0, 0, true, 0,
+                          viewport.extra_row_count - 1, false, cursor_row_for_display, -1);
     }
 
     // overwrite trailing rows we do not use anymore
-    ssize_t rrows = last_row - first_row + 1;  // rendered rows
-    if (rrows < visible_termh && rows < eb->cur_rows) {
-        ssize_t clear = eb->cur_rows - rows;
+    ssize_t rrows = view_rows;
+    if (rrows < visible_termh && view_rows < eb->view_rows) {
+        ssize_t clear = eb->view_rows - view_rows;
         while (rrows < visible_termh && clear > 0) {
             clear--;
             rrows++;
@@ -1735,7 +1801,7 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
 
     // move cursor back to edit position
     term_start_of_line(env->term);
-    term_up(env->term, first_row + rrows - 1 - rc.row);
+    term_up(env->term, rrows - 1 - visible_cursor_row);
 
     // Calculate the actual prompt width for the current row
     ssize_t actual_prompt_width;
@@ -1771,7 +1837,7 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
     term_flush(env->term);
 
     // stop buffering
-    term_set_buffer_mode(env->term, bmode);
+    (void)term_set_buffer_mode(env->term, bmode);
 
     // restore input by removing the hint
     sbuf_delete_at(eb->input, eb->pos, sbuf_len(eb->hint));
@@ -1782,32 +1848,63 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
 
     // update previous
     eb->cur_rows = rows;
+    eb->input_rows = rows_input;
+    eb->mouse_terminal_selection_extra = (!menu_active && rows_extra > 0);
     eb->cur_row = rc.row;
-    eb->view_first_row = first_row;
+    eb->view_first_row = first_input_row;
+    eb->view_input_rows = viewport.input_row_count;
+    eb->view_rows = view_rows;
     eb->force_linear_line_numbers = false;
 }
 
 // clear current output
 static void edit_clear(ic_env_t* env, editor_t* eb) {
+    const ssize_t clear_rows = (eb->view_rows > 0 ? eb->view_rows : 1);
+    const ssize_t visible_cursor_row = edit_view_cursor_row(eb);
     term_attr_reset(env->term);
-    term_up(env->term, eb->cur_row);
+    term_up(env->term, visible_cursor_row);
 
     // overwrite all rows
-    for (ssize_t i = 0; i < eb->cur_rows; i++) {
+    for (ssize_t i = 0; i < clear_rows; i++) {
         term_clear_line(env->term);
         term_writeln(env->term, "");
     }
 
     // move cursor back
-    term_up(env->term, eb->cur_rows - eb->cur_row);
+    term_up(env->term, clear_rows - visible_cursor_row);
+}
+
+// Prompt prefix lines are emitted above the editor and are not included in eb->cur_rows.
+// Clear both regions and leave the cursor at their shared origin.
+static void edit_clear_with_prompt_prefix(ic_env_t* env, editor_t* eb,
+                                          ssize_t prompt_prefix_lines) {
+    if (env == NULL || eb == NULL) {
+        return;
+    }
+
+    const ssize_t display_rows = (eb->view_rows > 0 ? eb->view_rows : 1);
+    const ssize_t cursor_row = edit_view_cursor_row(eb);
+    if (prompt_prefix_lines < 0) {
+        prompt_prefix_lines = 0;
+    }
+
+    const ssize_t total_rows = prompt_prefix_lines + display_rows;
+    term_attr_reset(env->term);
+    term_start_of_line(env->term);
+    term_up(env->term, prompt_prefix_lines + cursor_row);
+    for (ssize_t i = 0; i < total_rows; ++i) {
+        term_clear_line(env->term);
+        term_writeln(env->term, "");
+    }
+    term_up(env->term, total_rows);
 }
 
 // clear screen and refresh
 static void edit_clear_screen(ic_env_t* env, editor_t* eb) {
-    ssize_t cur_rows = eb->cur_rows;
-    eb->cur_rows = term_get_height(env->term) - 1;
+    const ssize_t view_rows = eb->view_rows;
+    eb->view_rows = term_get_height(env->term) - 1;
     edit_clear(env, eb);
-    eb->cur_rows = cur_rows;
+    eb->view_rows = view_rows;
     if (eb->prompt_prefix_lines > 0) {
         redraw_prompt_prefix_lines(env, eb);
     }
@@ -1818,7 +1915,7 @@ static void edit_clear_screen(ic_env_t* env, editor_t* eb) {
 // operations!)
 static bool edit_resize(ic_env_t* env, editor_t* eb) {
     // update dimensions
-    term_update_dim(env->term);
+    (void)term_update_dim(env->term);
     ssize_t newtermw = term_get_width(env->term);
     if (eb->termw == newtermw)
         return false;
@@ -1827,8 +1924,8 @@ static bool edit_resize(ic_env_t* env, editor_t* eb) {
     // width
     ssize_t promptw, cpromptw;
     edit_get_prompt_width(env, eb, false, &promptw, &cpromptw);
-    sbuf_insert_at(eb->input, sbuf_string(eb->hint),
-                   eb->pos);  // insert used hint
+    (void)sbuf_insert_at(eb->input, sbuf_string(eb->hint),
+                         eb->pos);  // insert used hint
 
     // render extra (status lines, hint help, completion menu)
     stringbuf_t* extra = NULL;
@@ -1901,8 +1998,8 @@ static void editor_append_hint_help(editor_t* eb, const char* help) {
     sbuf_clear(eb->hint_help);
     if (help != NULL) {
         sbuf_replace(eb->hint_help, "[ic-info]");
-        sbuf_append(eb->hint_help, help);
-        sbuf_append(eb->hint_help, "[/ic-info]\n");
+        (void)sbuf_append(eb->hint_help, help);
+        (void)sbuf_append(eb->hint_help, "[/ic-info]\n");
     }
 }
 
@@ -1960,7 +2057,7 @@ static void edit_refresh_hint(ic_env_t* env, editor_t* eb) {
                             extra_hint = completions_get_hint(env->completions, 0, &extra_help);
                             if (extra_hint != NULL) {
                                 editor_append_hint_help(eb, extra_help);
-                                sbuf_append(eb->hint, extra_hint);
+                                (void)sbuf_append(eb->hint, extra_hint);
                             }
                         }
                     } while (count == 1);
@@ -1996,7 +2093,7 @@ static void edit_cursor_left(ic_env_t* env, editor_t* eb) {
     if (prev < 0)
         return;
     rowcol_t rc;
-    edit_get_rowcol(env, eb, &rc);
+    (void)edit_get_rowcol(env, eb, &rc);
     eb->pos = prev;
     edit_refresh_hint(env, eb);
 }
@@ -2007,7 +2104,7 @@ static void edit_cursor_right(ic_env_t* env, editor_t* eb) {
     if (next < 0)
         return;
     rowcol_t rc;
-    edit_get_rowcol(env, eb, &rc);
+    (void)edit_get_rowcol(env, eb, &rc);
     eb->pos = next;
     edit_refresh_hint(env, eb);
 }
@@ -2080,7 +2177,7 @@ static void edit_cursor_to_end(ic_env_t* env, editor_t* eb) {
 
 static void edit_cursor_row_up(ic_env_t* env, editor_t* eb) {
     rowcol_t rc;
-    edit_get_rowcol(env, eb, &rc);
+    (void)edit_get_rowcol(env, eb, &rc);
     if (rc.row == 0) {
         edit_history_prev(env, eb);
     } else {
@@ -2090,7 +2187,7 @@ static void edit_cursor_row_up(ic_env_t* env, editor_t* eb) {
 
 static void edit_cursor_row_up_with_history_spell(ic_env_t* env, editor_t* eb) {
     rowcol_t rc;
-    edit_get_rowcol(env, eb, &rc);
+    (void)edit_get_rowcol(env, eb, &rc);
     if (rc.row != 0) {
         edit_set_pos_at_rowcol(env, eb, rc.row - 1, rc.col);
         return;
@@ -2147,7 +2244,7 @@ static void edit_cursor_row_up_with_history_spell(ic_env_t* env, editor_t* eb) {
     }
 
     if (completions_all_sources_equal(env->completions, "spell")) {
-        edit_complete(env, eb, 0);
+        (void)edit_complete(env, eb, 0);
         mem_free(env->mem, original_word);
         completions_clear(env->completions);
         return;
@@ -2193,7 +2290,7 @@ static void edit_cursor_row_up_with_history_spell(ic_env_t* env, editor_t* eb) {
             (best_replacement == NULL ? 0 : (size_t)ic_strlen(best_replacement));
         size_t threshold = edit_spell_threshold((size_t)original_len, replacement_len);
         if (best_distance <= threshold) {
-            edit_complete(env, eb, best_spell_idx);
+            (void)edit_complete(env, eb, best_spell_idx);
         }
     }
 
@@ -2380,9 +2477,16 @@ static void edit_multiline_eol(ic_env_t* env, editor_t* eb) {
     if (sbuf_string(eb->input)[eb->pos - 1] != env->multiline_eol)
         return;
     editor_start_modify(eb);
+    if (env->retain_multiline_continuation) {
+        ssize_t nextpos = sbuf_insert_at(eb->input, "\n", eb->pos);
+        if (nextpos >= 0)
+            eb->pos = nextpos;
+        edit_refresh(env, eb);
+        return;
+    }
     // replace line continuation with a real newline
     sbuf_delete_at(eb->input, eb->pos - 1, 1);
-    sbuf_insert_at(eb->input, "\n", eb->pos - 1);
+    (void)sbuf_insert_at(eb->input, "\n", eb->pos - 1);
     edit_refresh(env, eb);
 }
 
@@ -2432,12 +2536,12 @@ static void edit_auto_brace(ic_env_t* env, editor_t* eb, char c) {
                     return;
                 if (open == '\'' && edit_is_word_char(sbuf_char_at(eb->input, inserted_index - 1)))
                     return;
-                sbuf_insert_char_at(eb->input, close, eb->pos);
+                (void)sbuf_insert_char_at(eb->input, close, eb->pos);
                 return;
             }
-            sbuf_insert_char_at(eb->input, close, eb->pos);
+            (void)sbuf_insert_char_at(eb->input, close, eb->pos);
             bool balanced = false;
-            find_matching_brace(sbuf_string(eb->input), eb->pos, braces, &balanced);
+            (void)find_matching_brace(sbuf_string(eb->input), eb->pos, braces, &balanced);
             if (!balanced) {
                 // don't insert if it leads to an unbalanced expression.
                 sbuf_delete_char_at(eb->input, eb->pos);
@@ -2464,7 +2568,7 @@ static void editor_auto_indent(editor_t* eb, const char* pre, const char* post) 
         if (!ic_starts_with(sbuf_string(eb->input) + eb->pos, post))
             return;
         eb->pos = sbuf_insert_at(eb->input, "  ", eb->pos);
-        sbuf_insert_char_at(eb->input, '\n', eb->pos);
+        (void)sbuf_insert_char_at(eb->input, '\n', eb->pos);
     }
 }
 
@@ -2584,7 +2688,7 @@ static void edit_insert_char(ic_env_t* env, editor_t* eb, char c) {
     if (nextpos >= 0)
         eb->pos = nextpos;
     if (c == ' ' || c == '\n' || c == '\r') {
-        edit_try_expand_abbreviation(env, eb, true, true);
+        (void)edit_try_expand_abbreviation(env, eb, true, true);
     }
     edit_auto_brace(env, eb, c);
     if (c == '\n') {
@@ -2745,7 +2849,7 @@ static void edit_format_mouse_enabled_status_hint(ic_env_t* env, bool include_di
         }
     }
 
-    ic_strncpy(buffer, (ssize_t)buflen, "Mouse clicking is enabled", (ssize_t)buflen - 1);
+    (void)ic_strncpy(buffer, (ssize_t)buflen, "Mouse clicking is enabled", (ssize_t)buflen - 1);
 }
 
 static ic_mouse_clicking_mode_t edit_normalize_mouse_mode(ic_mouse_clicking_mode_t mode) {
@@ -2753,14 +2857,20 @@ static ic_mouse_clicking_mode_t edit_normalize_mouse_mode(ic_mouse_clicking_mode
         case IC_MOUSE_CLICKING_DISABLED:
         case IC_MOUSE_CLICKING_SIMPLE:
         case IC_MOUSE_CLICKING_SMART:
+        case IC_MOUSE_CLICKING_MENU_ONLY:
             return mode;
         default:
             return IC_MOUSE_CLICKING_SMART;
     }
 }
 
-static bool edit_mouse_mode_supports_capture(ic_mouse_clicking_mode_t mode) {
-    return (edit_normalize_mouse_mode(mode) != IC_MOUSE_CLICKING_DISABLED);
+static bool edit_mouse_mode_supports_editing_capture(ic_mouse_clicking_mode_t mode) {
+    const ic_mouse_clicking_mode_t normalized = edit_normalize_mouse_mode(mode);
+    return (normalized == IC_MOUSE_CLICKING_SIMPLE || normalized == IC_MOUSE_CLICKING_SMART);
+}
+
+static bool edit_mouse_mode_is_menu_only(ic_mouse_clicking_mode_t mode) {
+    return (edit_normalize_mouse_mode(mode) == IC_MOUSE_CLICKING_MENU_ONLY);
 }
 
 static bool edit_mouse_capture_should_be_enabled(const editor_t* eb) {
@@ -2768,7 +2878,7 @@ static bool edit_mouse_capture_should_be_enabled(const editor_t* eb) {
         return false;
     }
 
-    if (!edit_mouse_mode_supports_capture(eb->mouse_reporting_mode) ||
+    if (!edit_mouse_mode_supports_editing_capture(eb->mouse_reporting_mode) ||
         !eb->mouse_reporting_manual_enabled) {
         return false;
     }
@@ -2878,19 +2988,21 @@ static void edit_set_mouse_manual_enabled(ic_env_t* env, editor_t* eb, bool enab
         return;
     }
 
-    if (!edit_mouse_mode_supports_capture(eb->mouse_reporting_mode)) {
+    if (!edit_mouse_mode_supports_editing_capture(eb->mouse_reporting_mode)) {
         enabled = false;
     }
 
     eb->mouse_reporting_manual_enabled = enabled;
     if (!enabled) {
         eb->mouse_reporting_auto_suspended = false;
+        eb->mouse_terminal_selection_suspended = false;
     }
 
     edit_apply_mouse_reporting_policy(env, eb);
 }
 
-static void edit_set_mouse_auto_suspended(ic_env_t* env, editor_t* eb, bool suspended) {
+static void edit_set_mouse_auto_suspended(ic_env_t* env, editor_t* eb, bool suspended,
+                                          bool terminal_selection) {
     if (eb == NULL) {
         return;
     }
@@ -2900,11 +3012,14 @@ static void edit_set_mouse_auto_suspended(ic_env_t* env, editor_t* eb, bool susp
         suspended = false;
     }
 
-    if (eb->mouse_reporting_auto_suspended == suspended) {
+    const bool selection_suspended = (suspended && terminal_selection);
+    if (eb->mouse_reporting_auto_suspended == suspended &&
+        eb->mouse_terminal_selection_suspended == selection_suspended) {
         return;
     }
 
     eb->mouse_reporting_auto_suspended = suspended;
+    eb->mouse_terminal_selection_suspended = selection_suspended;
     edit_apply_mouse_reporting_policy(env, eb);
 }
 
@@ -3002,11 +3117,11 @@ static void edit_maybe_resume_smart_mouse_reporting(ic_env_t* env, editor_t* eb,
     }
 
     if (edit_mouse_auto_resume_triggered_by_key(key)) {
-        edit_set_mouse_auto_suspended(env, eb, false);
+        edit_set_mouse_auto_suspended(env, eb, false, false);
     }
 }
 
-static bool edit_mouse_event_is_above_viewport(ic_env_t* env, editor_t* eb) {
+static bool edit_mouse_event_starts_terminal_selection(ic_env_t* env, editor_t* eb) {
     if (env == NULL || eb == NULL || env->tty == NULL) {
         return false;
     }
@@ -3024,12 +3139,36 @@ static bool edit_mouse_event_is_above_viewport(ic_env_t* env, editor_t* eb) {
     ssize_t target_row = 0;
     ssize_t target_col = 0;
     bool clicked_above_viewport = false;
-    (void)edit_mouse_event_to_target_rowcol(env, eb, &mouse_event, &target_row, &target_col,
-                                            &clicked_above_viewport);
-    return clicked_above_viewport;
+    const bool has_target = edit_mouse_event_to_target_rowcol(env, eb, &mouse_event, &target_row,
+                                                              &target_col, &clicked_above_viewport);
+    if (clicked_above_viewport) {
+        return true;
+    }
+    if (!has_target) {
+        return false;
+    }
+
+    // Status and other non-menu helper rows are display-only. Let a drag that starts there select
+    // terminal text instead of keeping click-to-position capture active.
+    if (target_row >= eb->input_rows) {
+        return eb->mouse_terminal_selection_extra;
+    }
+
+    // The left prompt and continuation/line-number gutters are not editable text either. A click
+    // in the input columns remains a cursor-positioning click; a press in these prefix columns
+    // hands control back to the terminal's selection behavior.
+    ssize_t promptw = 0;
+    ssize_t cpromptw = 0;
+    edit_get_prompt_width(env, eb, false, &promptw, &cpromptw);
+    const ssize_t row_prompt_width = (target_row == 0 ? promptw : cpromptw);
+    return (target_col < row_prompt_width);
 }
 
-static bool edit_should_auto_suspend_mouse_reporting(ic_env_t* env, editor_t* eb, code_t key) {
+static bool edit_should_auto_suspend_mouse_reporting(ic_env_t* env, editor_t* eb, code_t key,
+                                                     bool* terminal_selection) {
+    if (terminal_selection != NULL) {
+        *terminal_selection = false;
+    }
     if (env == NULL || eb == NULL) {
         return false;
     }
@@ -3044,7 +3183,11 @@ static bool edit_should_auto_suspend_mouse_reporting(ic_env_t* env, editor_t* eb
         return true;
     }
 
-    if (key_no_mods == KEY_EVENT_MOUSE_OTHER && edit_mouse_event_is_above_viewport(env, eb)) {
+    if (key_no_mods == KEY_EVENT_MOUSE_OTHER &&
+        edit_mouse_event_starts_terminal_selection(env, eb)) {
+        if (terminal_selection != NULL) {
+            *terminal_selection = true;
+        }
         return true;
     }
 
@@ -3056,7 +3199,7 @@ static void edit_toggle_mouse_reporting(ic_env_t* env, editor_t* eb) {
         return;
     }
 
-    if (!edit_mouse_mode_supports_capture(eb->mouse_reporting_mode)) {
+    if (!edit_mouse_mode_supports_editing_capture(eb->mouse_reporting_mode)) {
         return;
     }
 
@@ -3077,6 +3220,7 @@ static void edit_reset_mouse_reporting_session(ic_env_t* env, editor_t* eb, bool
         eb->mouse_reporting_mode = IC_MOUSE_CLICKING_DISABLED;
         eb->mouse_reporting_manual_enabled = false;
         eb->mouse_reporting_auto_suspended = false;
+        eb->mouse_terminal_selection_suspended = false;
         edit_apply_mouse_reporting_policy(env, eb);
         edit_set_mouse_focus_reporting(env, eb, false);
         return;
@@ -3091,8 +3235,9 @@ static void edit_reset_mouse_reporting_session(ic_env_t* env, editor_t* eb, bool
 
     eb->mouse_reporting_mode = edit_normalize_mouse_mode(mode);
     eb->mouse_reporting_manual_enabled =
-        (default_enabled && edit_mouse_mode_supports_capture(eb->mouse_reporting_mode));
+        (default_enabled && edit_mouse_mode_supports_editing_capture(eb->mouse_reporting_mode));
     eb->mouse_reporting_auto_suspended = false;
+    eb->mouse_terminal_selection_suspended = false;
     edit_apply_mouse_reporting_policy(env, eb);
     edit_set_mouse_focus_reporting(env, eb, (eb->mouse_reporting_mode == IC_MOUSE_CLICKING_SMART));
 }
@@ -3102,11 +3247,17 @@ static bool edit_enable_menu_mouse_scroll(ic_env_t* env) {
         return false;
     }
 
-    if (!edit_mouse_capture_should_be_enabled(env->current_editor)) {
+    editor_t* eb = env->current_editor;
+    if (edit_normalize_mouse_mode(eb->mouse_reporting_mode) == IC_MOUSE_CLICKING_DISABLED) {
         return false;
     }
 
-    return edit_enable_mouse_tracking(env, env->current_editor);
+    if (!edit_mouse_mode_is_menu_only(eb->mouse_reporting_mode) &&
+        !edit_mouse_capture_should_be_enabled(eb)) {
+        return false;
+    }
+
+    return edit_enable_mouse_tracking(env, eb);
 }
 
 static void edit_disable_menu_mouse_scroll(ic_env_t* env, bool enabled) {
@@ -3133,6 +3284,12 @@ static void edit_disable_menu_mouse_scroll(ic_env_t* env, bool enabled) {
 //-------------------------------------------------------------
 
 #include "editline_command_palette.c"
+
+//-------------------------------------------------------------
+// Application-provided menus
+//-------------------------------------------------------------
+
+#include "editline_custom_menu.c"
 
 //-------------------------------------------------------------
 // Completion
@@ -3189,7 +3346,7 @@ static bool insert_initial_input(const char* initial_input, editor_t* eb) {
 
     sbuf_clear(eb->input);
     if (length > 0) {
-        sbuf_append_n(eb->input, initial_input, length);
+        (void)sbuf_append_n(eb->input, initial_input, length);
     }
     eb->pos = sbuf_len(eb->input);
     return has_trailing_enter;
@@ -3221,15 +3378,15 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
         } else {
             custom_combined = sbuf_new(eb->mem);
             if (custom_combined != NULL) {
-                sbuf_append(custom_combined, custom_message);
+                (void)sbuf_append(custom_combined, custom_message);
                 ssize_t custom_len = sbuf_len(custom_combined);
                 if (custom_len > 0) {
                     const char* existing = sbuf_string(custom_combined);
                     if (existing != NULL && existing[custom_len - 1] != '\n') {
-                        sbuf_append_char(custom_combined, '\n');
+                        (void)sbuf_append_char(custom_combined, '\n');
                     }
                 }
-                sbuf_append(custom_combined, spell_message);
+                (void)sbuf_append(custom_combined, spell_message);
                 custom_message = sbuf_string(custom_combined);
             }
         }
@@ -3273,10 +3430,10 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
             if (combine_with_custom && has_custom_message) {
                 combined = sbuf_new(eb->mem);
                 if (combined != NULL) {
-                    sbuf_append(combined, fallback_buffer);
+                    (void)sbuf_append(combined, fallback_buffer);
                     if (custom_message[0] != '\0') {
-                        sbuf_append_char(combined, '\n');
-                        sbuf_append(combined, custom_message);
+                        (void)sbuf_append_char(combined, '\n');
+                        (void)sbuf_append(combined, custom_message);
                     }
                     next = sbuf_string(combined);
                 } else {
@@ -3294,7 +3451,8 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
         }
     }
 
-    if (eb->mouse_reporting_enabled && env->mouse_reporting_status_line_enabled) {
+    if ((eb->mouse_reporting_enabled || eb->mouse_terminal_selection_suspended) &&
+        env->mouse_reporting_status_line_enabled) {
         edit_format_mouse_enabled_status_hint(env, true, mouse_status_text,
                                               sizeof(mouse_status_text));
         if (snprintf(mouse_status_bbcode, sizeof(mouse_status_bbcode), "[ic-status]%s[/]",
@@ -3304,10 +3462,10 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
 
         with_mouse_prefix = sbuf_new(eb->mem);
         if (with_mouse_prefix != NULL) {
-            sbuf_append(with_mouse_prefix, mouse_status_prefix);
+            (void)sbuf_append(with_mouse_prefix, mouse_status_prefix);
             if (next != NULL && next[0] != '\0') {
-                sbuf_append_char(with_mouse_prefix, '\n');
-                sbuf_append(with_mouse_prefix, next);
+                (void)sbuf_append_char(with_mouse_prefix, '\n');
+                (void)sbuf_append(with_mouse_prefix, next);
             }
             next = sbuf_string(with_mouse_prefix);
         } else if (next == NULL || next[0] == '\0') {
@@ -3389,7 +3547,10 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     eb.termw = term_get_width(env->term);
     eb.pos = 0;
     eb.cur_rows = 1;
+    eb.input_rows = 1;
     eb.cur_row = 0;
+    eb.view_rows = 1;
+    eb.view_input_rows = 1;
     eb.modified = false;
 
     const char* original_prompt = (prompt_text != NULL ? prompt_text : "");
@@ -3480,7 +3641,7 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     if (env->initial_input != NULL) {
         initial_requests_submit = insert_initial_input(env->initial_input, &eb);
         // Expand pending abbreviations in pre-seeded buffers (e.g., typeahead with trailing space)
-        edit_expand_abbreviation_if_needed(env, &eb, false);
+        (void)edit_expand_abbreviation_if_needed(env, &eb, false);
     } else {
         seeded_multiline_lines = apply_default_multiline_start_lines(env, &eb);
     }
@@ -3509,7 +3670,7 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     }
 
     // always a history entry for the current input
-    history_push(env->history, "");
+    (void)history_push(env->history, "");
 
     if (edit_update_status_message(env, &eb)) {
         if (eb.refresh_suppressed) {
@@ -3597,7 +3758,7 @@ edit_loop_entry:
                 should_resize = true;
             }
             if (should_resize) {
-                edit_resize(env, &eb);
+                (void)edit_resize(env, &eb);
             }
 
             // clear hint only after a potential resize (so resize row calculations
@@ -3664,8 +3825,9 @@ edit_loop_entry:
                 continue;
             }
 
-            if (edit_should_auto_suspend_mouse_reporting(env, &eb, c)) {
-                edit_set_mouse_auto_suspended(env, &eb, true);
+            bool terminal_selection = false;
+            if (edit_should_auto_suspend_mouse_reporting(env, &eb, c, &terminal_selection)) {
+                edit_set_mouse_auto_suspended(env, &eb, true, terminal_selection);
                 if (pending_hint != NULL) {
                     mem_free(eb.mem, pending_hint);
                     pending_hint = NULL;
@@ -3691,10 +3853,12 @@ edit_loop_entry:
             if (c == KEY_ENTER) {
                 // Clear history preview when submitting
                 edit_clear_history_preview(&eb);
-                if (!env->singleline_only && eb.pos > 0 &&
+                if (!env->singleline_only && editor_pos_is_at_end(&eb) && eb.pos > 0 &&
                     sbuf_string(eb.input)[eb.pos - 1] == env->multiline_eol &&
                     edit_pos_is_at_row_end(env, &eb)) {
-                    // replace line-continuation with newline
+                    // At the end of the buffer, start a new row after a line-continuation.
+                    // A continuation on an earlier line is already followed by content, so Enter
+                    // there submits the complete buffer instead of adding another continuation.
                     edit_multiline_eol(env, &eb);
                 } else {
                     // otherwise done
@@ -3736,7 +3900,7 @@ edit_loop_entry:
                 switch (c) {
                         // events
                     case KEY_EVENT_RESIZE:
-                        edit_resize(env, &eb);
+                        (void)edit_resize(env, &eb);
                         break;
                     case KEY_EVENT_AUTOTAB:
                         edit_generate_completions(env, &eb, true);
@@ -3760,7 +3924,7 @@ edit_loop_entry:
                         break;
                     case KEY_CTRL_R:
                     case KEY_CTRL_S:
-                        edit_history_search_with_current_word(env, &eb);
+                        edit_history_search_with_current_line(env, &eb);
                         break;
                     case WITH_ALT('p'):
                     case WITH_ALT('P'):
@@ -3940,7 +4104,7 @@ edit_loop_entry:
             pending_key = KEY_LINEFEED;
             goto edit_loop_entry;
         }
-        edit_expand_abbreviation_if_needed(env, &eb, false);
+        (void)edit_expand_abbreviation_if_needed(env, &eb, false);
         c = KEY_ENTER;
     }
 
@@ -3950,7 +4114,7 @@ edit_loop_entry:
 
     // Final chance to expand pending abbreviations (e.g., buffered typeahead ending in space)
     if (!ctrl_c_pressed && !ctrl_d_pressed && c != KEY_EVENT_STOP) {
-        edit_expand_abbreviation_if_needed(env, &eb, false);
+        (void)edit_expand_abbreviation_if_needed(env, &eb, false);
     }
 
     if (eb.status != NULL && sbuf_len(eb.status) > 0) {
@@ -3997,7 +4161,7 @@ edit_loop_entry:
     }
 
     // update history in memory (file saving handled after execution)
-    history_update(env->history, sbuf_string(eb.input));
+    (void)history_update(env->history, sbuf_string(eb.input));
     if (res == NULL || sbuf_len(eb.input) <= 1) {
         ic_history_remove_last();
     }
@@ -4087,6 +4251,114 @@ ic_public bool ic_request_submit(void) {
     return true;
 }
 
+ic_public bool ic_current_loop_advance_with_prompt(const char* new_buffer,
+                                                   const char* preserved_prompt,
+                                                   const char* preserved_inline_right) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL || env->current_editor == NULL)
+        return false;
+
+    editor_t* eb = env->current_editor;
+    const char* original_inline_right = eb->inline_right_text;
+    stringbuf_t* original_prompt = NULL;
+
+    if (preserved_prompt != NULL) {
+        original_prompt = sbuf_new(env->mem);
+        if (original_prompt == NULL)
+            return false;
+        if (eb->prompt_prefix_text != NULL) {
+            (void)sbuf_append(original_prompt, eb->prompt_prefix_text);
+        }
+        (void)sbuf_append(original_prompt, eb->prompt_text);
+    }
+
+    if ((preserved_prompt != NULL || preserved_inline_right != NULL) &&
+        !ic_current_loop_reset(NULL, preserved_prompt, preserved_inline_right)) {
+        sbuf_free(original_prompt);
+        return false;
+    }
+
+    // Leave only the prompt and real input behind. Transient menu, status, and hint rows
+    // belong to the active editor and should not become terminal output.
+    sbuf_clear(eb->extra);
+    sbuf_clear(eb->status);
+    sbuf_clear(eb->hint);
+    sbuf_clear(eb->hint_help);
+    edit_refresh(env, eb);
+
+    // Move below the complete rendered editor without clearing it. Prompt prefix lines live
+    // above the viewport, so the visible cursor offset is sufficient to reach its last row.
+    const ssize_t visible_cursor_row = edit_view_cursor_row(eb);
+    const ssize_t rendered_rows = (eb->view_rows > 0 ? eb->view_rows : 1);
+    term_start_of_line(env->term);
+    term_down(env->term, rendered_rows - visible_cursor_row - 1);
+    term_writeln(env->term, "");
+
+    sbuf_replace(eb->input, (new_buffer != NULL ? new_buffer : ""));
+    eb->pos = sbuf_len(eb->input);
+    eb->modified = true;
+    eb->cur_rows = 1;
+    eb->input_rows = 1;
+    eb->cur_row = 0;
+    eb->view_first_row = 0;
+    eb->view_rows = 1;
+    eb->view_input_rows = 1;
+
+    if (original_prompt != NULL) {
+        const char* prompt_text = sbuf_string(original_prompt);
+        mem_free(env->mem, (void*)eb->prompt_text);
+        eb->prompt_text = extract_last_prompt_line(env->mem, prompt_text);
+        eb->prompt_prefix_lines = print_prompt_prefix_lines(env, eb, prompt_text);
+        eb->prompt_begins_with_newline = (prompt_text[0] == '\n');
+        eb->replace_prompt_line_with_number = prompt_line_should_use_line_numbers(env, eb);
+    } else if (eb->prompt_prefix_lines > 0) {
+        redraw_prompt_prefix_lines(env, eb);
+    }
+    if (preserved_inline_right != NULL) {
+        eb->inline_right_text = original_inline_right;
+        eb->inline_right_width = 0;
+    }
+    edit_write_prompt(env, eb, 0, false, 0, 0, 0, false);
+    edit_refresh(env, eb);
+    sbuf_free(original_prompt);
+    return true;
+}
+
+ic_public bool ic_current_loop_advance(const char* new_buffer) {
+    return ic_current_loop_advance_with_prompt(new_buffer, NULL, NULL);
+}
+
+ic_public bool ic_show_menu(const char* prompt_text, const ic_menu_item_t* items, size_t count,
+                            size_t* selected_index) {
+    return ic_show_menu_ex(prompt_text, items, count, selected_index, NULL);
+}
+
+ic_public bool ic_show_menu_ex(const char* prompt_text, const ic_menu_item_t* items, size_t count,
+                               size_t* selected_index, ic_menu_accept_t* accept) {
+    if (accept != NULL) {
+        *accept = IC_MENU_ACCEPT_NONE;
+    }
+    ic_env_t* env = ic_get_env();
+    if (env == NULL || env->current_editor == NULL || env->tty == NULL || items == NULL ||
+        count == 0) {
+        return false;
+    }
+
+    const ssize_t item_count = to_ssize_t(count);
+    if (item_count <= 0) {
+        return false;
+    }
+    for (ssize_t i = 0; i < item_count; ++i) {
+        if (items[i].label == NULL || items[i].label[0] == '\0') {
+            return false;
+        }
+    }
+
+    const char* prompt = (prompt_text != NULL ? prompt_text : "select: ");
+    return edit_custom_menu(env, env->current_editor, prompt, items, item_count, selected_index,
+                            accept);
+}
+
 ic_public bool ic_current_loop_reset(const char* new_buffer, const char* new_prompt,
                                      const char* new_inline_right) {
     ic_env_t* env = ic_get_env();
@@ -4094,6 +4366,17 @@ ic_public bool ic_current_loop_reset(const char* new_buffer, const char* new_pro
         return false;
 
     editor_t* eb = env->current_editor;
+
+    // Prefix lines live outside eb->cur_rows, so clear the complete old prompt before
+    // replacing any of the state used to locate it.
+    const ssize_t old_prompt_prefix_lines = eb->prompt_prefix_lines;
+    edit_clear_with_prompt_prefix(env, eb, old_prompt_prefix_lines);
+    eb->cur_row = 0;
+    eb->cur_rows = 1;
+    eb->input_rows = 1;
+    eb->view_first_row = 0;
+    eb->view_rows = 1;
+    eb->view_input_rows = 1;
 
     // Update buffer if provided
     if (new_buffer != NULL) {
@@ -4115,6 +4398,9 @@ ic_public bool ic_current_loop_reset(const char* new_buffer, const char* new_pro
         eb->prompt_prefix_lines = print_prompt_prefix_lines(env, eb, new_prompt);
         eb->prompt_begins_with_newline = (new_prompt[0] == '\n');
         eb->replace_prompt_line_with_number = prompt_line_should_use_line_numbers(env, eb);
+    } else if (old_prompt_prefix_lines > 0) {
+        // The display was fully cleared even when only the buffer or right prompt changed.
+        redraw_prompt_prefix_lines(env, eb);
     }
 
     // Update inline right text if provided
@@ -4122,11 +4408,6 @@ ic_public bool ic_current_loop_reset(const char* new_buffer, const char* new_pro
         eb->inline_right_text = new_inline_right;
         eb->inline_right_width = 0;  // Will be recalculated
     }
-
-    // Clear current display and reset cursor tracking
-    edit_clear(env, eb);
-    eb->cur_row = 0;
-    eb->cur_rows = 1;
 
     // Rewrite the prompt
     edit_write_prompt(env, eb, 0, false, 0, 0, 0, false);
