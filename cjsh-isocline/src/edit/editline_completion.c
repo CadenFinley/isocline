@@ -117,17 +117,27 @@ static const char* completion_source_view(alloc_t* mem, const char* source, ssiz
     if (source == NULL) {
         return NULL;
     }
-    if (max_chars <= 0 || allow_full_length) {
+    if (allow_full_length) {
         return source;
     }
-    ssize_t len = ic_strlen(source);
-    if (len <= max_chars) {
+
+    const char* line_end = edit_menu_first_line_end(source);
+    ssize_t len = (line_end == NULL ? ic_strlen(source) : (ssize_t)(line_end - source));
+    bool multiline = (line_end != NULL && (*line_end == '\n' || *line_end == '\r'));
+    if (!multiline && (max_chars <= 0 || len <= max_chars)) {
         return source;
     }
-    ssize_t ellipsis = (max_chars >= 3 ? 3 : 0);
-    ssize_t copy_len = max_chars - ellipsis;
-    if (copy_len < 0) {
-        copy_len = 0;
+
+    ssize_t ellipsis = (max_chars <= 0 || max_chars >= 3 ? 3 : 0);
+    ssize_t copy_len = len;
+    if (max_chars > 0) {
+        ssize_t max_copy_len = max_chars - ellipsis;
+        if (max_copy_len < 0) {
+            max_copy_len = 0;
+        }
+        if (copy_len > max_copy_len) {
+            copy_len = max_copy_len;
+        }
     }
     ssize_t total = copy_len + ellipsis;
     char* truncated = mem_malloc_tp_n(mem, char, total + 1);
@@ -284,11 +294,7 @@ static void edit_completion_menu_update_hint(ic_env_t* env, editor_t* eb, bool a
 
 static ssize_t edit_completion_available_rows_for_input(ic_env_t* env, editor_t* eb,
                                                         ssize_t input_rows) {
-    ssize_t term_height = term_get_height(env->term);
-    ssize_t available_rows = term_height - input_rows;
-    if (eb->prompt_prefix_lines > 0) {
-        available_rows -= eb->prompt_prefix_lines;
-    }
+    ssize_t available_rows = edit_available_terminal_rows(env, eb) - input_rows;
     if (available_rows < 3) {
         available_rows = 3;
     }
@@ -754,7 +760,10 @@ again:
     }
 
 read_key:
-    c = tty_read(env->tty);
+    if (!edit_menu_read_key(env, eb, &c)) {
+        c = 0;
+        goto cleanup;
+    }
     if (tty_term_resize_event(env->tty)) {
         (void)edit_resize(env, eb);
     }

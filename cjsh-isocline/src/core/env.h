@@ -81,8 +81,12 @@ struct ic_env_s {
     char* history_search_sort_key;    // metadata key for history metadata sort modes
     ic_highlight_fun_t* highlighter;  // highlight callback
     void* highlighter_arg;            // user state for the highlighter.
-    ic_unhandled_key_fun_t* unhandled_key_handler;     // callback for unhandled keys
-    void* unhandled_key_arg;                           // user state for unhandled key handler
+    ic_unhandled_key_fun_t* unhandled_key_handler;  // callback for unhandled keys
+    void* unhandled_key_arg;                        // user state for unhandled key handler
+    ic_readline_event_fun_t* readline_event_callback;
+    void* readline_event_arg;
+    bool readline_event_pending;                       // deferred while a nested menu is open
+    stringbuf_t* notifications;                        // text queued on the readline thread
     ic_status_message_fun_t* status_message_callback;  // callback for status message text
     void* status_message_arg;                          // user state for status callback
     ic_check_for_continuation_or_return_fun_t*
@@ -102,6 +106,9 @@ struct ic_env_s {
     const char* match_braces;                      // matching braces, e.g "()[]{}"
     const char* auto_braces;                       // auto insertion braces, e.g "()[]{}\"\"''"
     const char* initial_input;                     // initial input text to insert into editor
+    size_t initial_cursor_pos;                     // cursor for pre-seeded input
+    bool initial_cursor_pos_set;                   // whether the initial cursor was specified
+    size_t last_readline_cursor_pos;               // cursor captured when readline returned
     stringbuf_t* typeahead_input_buffer;           // sanitized pending typeahead text
     stringbuf_t* typeahead_pending_raw_bytes;      // raw bytes awaiting replay/filtering
     ic_readline_disposition_t last_readline_disposition;  // disposition from most recent read
@@ -137,6 +144,9 @@ struct ic_env_s {
     bool show_whitespace_characters;                   // visualize spaces while editing?
     bool inline_right_prompt_follows_cursor;           // right prompt tracks cursor row
     bool bracketed_paste_enabled;                      // bracketed paste mode active
+    bool readline_terminal_suspended;                  // external program owns the terminal
+    bool suspended_mouse_reporting_enabled;            // restore mouse capture after resume
+    bool suspended_focus_reporting_enabled;            // restore focus capture after resume
     bool typeahead_enabled;                            // capture pending stdin for next readline
     bool terminal_region_marking_enabled;              // emit OSC 133 semantic regions
     uint8_t terminal_region_state;                     // current OSC 133 lifecycle state
@@ -144,6 +154,7 @@ struct ic_env_s {
     size_t multiline_max_line_count;     // maximum visible input rows in multiline mode
     size_t multiline_bottom_line_count;  // content-row margin kept around the cursor
     long hint_delay;                     // delay before displaying a hint in milliseconds
+    long idle_timeout;                   // inactivity timeout in milliseconds (0 disables)
 
     ic_key_binding_entry_t* key_bindings;  // dynamic array of custom key bindings
     ssize_t key_binding_count;
@@ -165,9 +176,11 @@ struct ic_env_s {
 ic_private char* ic_editline(ic_env_t* env, const char* prompt_text, const char* inline_right_text);
 
 ic_private ic_env_t* ic_get_env(void);
+ic_private ic_env_t* ic_get_env_if_initialized(void);
 ic_private const char* ic_env_get_auto_braces(ic_env_t* env);
 ic_private const char* ic_env_get_match_braces(ic_env_t* env);
-ic_private void ic_env_set_initial_input(ic_env_t* env, const char* initial_input);
+ic_private void ic_env_set_initial_input(ic_env_t* env, const char* initial_input,
+                                         size_t cursor_pos, bool cursor_pos_set);
 ic_private void ic_env_clear_initial_input(ic_env_t* env);
 ic_private const char* ic_env_get_whitespace_marker(ic_env_t* env);
 

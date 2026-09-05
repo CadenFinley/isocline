@@ -39,7 +39,9 @@
 #include <string.h>
 #include <time.h>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -79,6 +81,7 @@ typedef struct editor_s {
     ssize_t view_rows;            // total rows physically rendered in the current viewport
     ssize_t view_input_rows;      // physically rendered prompt/input rows in the viewport
     ssize_t termw;
+    ssize_t termh;
     bool modified;                      // has a modification happened? (used for history navigation
                                         // for example)
     bool disable_undo;                  // temporarily disable auto undo (for history search)
@@ -87,6 +90,8 @@ typedef struct editor_s {
     bool history_prefix_active;         // whether prefix-prioritized history is active
     bool request_submit;                // request submission of current line
     bool force_linear_line_numbers;     // final render should drop relative numbering styling
+    int64_t last_activity_ms;           // last non-resize input, including input handled by menus
+    int64_t idle_deadline_ms;           // shared idle deadline for the editor and nested menus
     ssize_t history_idx;                // current index in the history
     bool last_arg_yank_active;          // whether yank-last-arg is cycling through history
     ssize_t last_arg_yank_history_idx;  // history index currently used for yank-last-arg
@@ -402,8 +407,8 @@ static bool key_binding_execute(ic_env_t* env, editor_t* eb, code_t key) {
 //-------------------------------------------------------------
 // Main edit line
 //-------------------------------------------------------------
-static bool insert_initial_input(const char* initial_input,
-                                 editor_t* eb);  // defined at bottom
+static bool insert_initial_input(const char* initial_input, editor_t* eb, size_t cursor_pos,
+                                 bool cursor_pos_set);  // defined below
 
 static void edit_set_rendered_hint_snapshot(editor_t* eb, const char* hint_text) {
     if (eb == NULL || eb->mem == NULL) {
@@ -425,14 +430,95 @@ static char* edit_line(ic_env_t* env, const char* prompt_text,
 static bool sbuf_ends_with_newline(stringbuf_t* sbuf);
 static bool edit_update_status_message(ic_env_t* env, editor_t* eb);
 
+static int64_t edit_monotonic_time_ms(void) {
+#if defined(_WIN32)
+    return (int64_t)GetTickCount64();
+#else
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+        return ((int64_t)now.tv_sec * 1000) + ((int64_t)now.tv_nsec / 1000000);
+    }
+    return (int64_t)time(NULL) * 1000;
+#endif
+}
+
+static long edit_milliseconds_until(int64_t deadline_ms) {
+    int64_t remaining = deadline_ms - edit_monotonic_time_ms();
+    if (remaining <= 0) {
+        return 0;
+    }
+    if (remaining > LONG_MAX) {
+        return LONG_MAX;
+    }
+    return (long)remaining;
+}
+
+static int64_t edit_deadline_after(int64_t start_ms, long delay_ms) {
+    if (delay_ms <= 0) {
+        return 0;
+    }
+    if (start_ms > INT64_MAX - (int64_t)delay_ms) {
+        return INT64_MAX;
+    }
+    return start_ms + (int64_t)delay_ms;
+}
+
+static void edit_note_input_activity(ic_env_t* env, editor_t* eb) {
+    if (env == NULL || eb == NULL) {
+        return;
+    }
+    eb->last_activity_ms = edit_monotonic_time_ms();
+    eb->idle_deadline_ms = edit_deadline_after(eb->last_activity_ms, env->idle_timeout);
+}
+
+// Menus run nested input loops, so they must share the editor's idle deadline instead of
+// blocking indefinitely. A false return tells the menu to cancel and return to the main loop,
+// which then completes the readline with an idle disposition.
+static bool edit_menu_read_key(ic_env_t* env, editor_t* eb, code_t* code) {
+    if (env == NULL || eb == NULL || code == NULL || env->tty == NULL) {
+        return false;
+    }
+    while (true) {
+        long idle_remaining =
+            (env->idle_timeout > 0 ? edit_milliseconds_until(eb->idle_deadline_ms) : -1);
+        if (idle_remaining == 0) {
+            return false;
+        }
+        if (tty_read_timeout(env->tty, idle_remaining, code)) {
+            if (*code == KEY_EVENT_READLINE) {
+                env->readline_event_pending = true;
+                continue;
+            }
+            if (*code != KEY_EVENT_RESIZE) {
+                edit_note_input_activity(env, eb);
+            }
+            return true;
+        }
+        if (env->idle_timeout > 0 && edit_milliseconds_until(eb->idle_deadline_ms) == 0) {
+            return false;
+        }
+    }
+}
+
 ic_private char* ic_editline(ic_env_t* env, const char* prompt_text,
                              const char* inline_right_text) {
     (void)tty_start_raw(env->tty);
     term_start_raw(env->term);
     char* line = edit_line(env, prompt_text, inline_right_text);
+    const bool idle_timeout = (env->last_readline_disposition == IC_READLINE_DISPOSITION_IDLE);
     term_end_raw(env->term, false);
     tty_end_raw(env->tty);
-    term_writeln(env->term, "");
+    if (!idle_timeout) {
+        term_writeln(env->term, "");
+    }
+    // A final redraw callback may have queued another message. The editor has
+    // now been released, so drain it without invoking any more render callbacks.
+    if (env->notifications != NULL) {
+        ic_term_abort_input_region(env);
+        term_write(env->term, sbuf_string(env->notifications));
+        sbuf_free(env->notifications);
+        env->notifications = NULL;
+    }
     term_flush(env->term);
     term_set_track_output(env->term, true);
     term_reset_line_state(env->term);
@@ -589,8 +675,8 @@ static ssize_t edit_get_rowcol(ic_env_t* env, editor_t* eb, rowcol_t* rc) {
     return sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw, eb->pos, rc);
 }
 
-static ssize_t edit_visible_input_row_count(ic_env_t* env, editor_t* eb, ssize_t input_rows) {
-    if (env == NULL || input_rows < 1) {
+static ssize_t edit_available_terminal_rows(ic_env_t* env, const editor_t* eb) {
+    if (env == NULL || env->term == NULL) {
         return 1;
     }
 
@@ -598,9 +684,15 @@ static ssize_t edit_visible_input_row_count(ic_env_t* env, editor_t* eb, ssize_t
     if (eb != NULL && eb->prompt_prefix_lines > 0) {
         available_rows -= eb->prompt_prefix_lines;
     }
-    if (available_rows < 1) {
-        available_rows = 1;
+    return (available_rows > 0 ? available_rows : 1);
+}
+
+static ssize_t edit_visible_input_row_count(ic_env_t* env, editor_t* eb, ssize_t input_rows) {
+    if (env == NULL || input_rows < 1) {
+        return 1;
     }
+
+    const ssize_t available_rows = edit_available_terminal_rows(env, eb);
 
     return editline_viewport_for(input_rows, 0, input_rows - 1, available_rows,
                                  env->multiline_max_line_count, env->multiline_bottom_line_count, 0)
@@ -1743,16 +1835,9 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
         "%zd)\n",
         rows, rc.row, rc.col, eb->cur_rows, eb->cur_row);
 
-    // only render at most terminal height rows
-    const ssize_t terminal_height = term_get_height(env->term);
-    const ssize_t prompt_prefix_lines = (eb->prompt_prefix_lines > 0 ? eb->prompt_prefix_lines : 0);
-    ssize_t visible_termh = terminal_height;
-    if (menu_active && prompt_prefix_lines > 0) {
-        visible_termh = terminal_height - prompt_prefix_lines;
-        if (visible_termh < 1) {
-            visible_termh = 1;
-        }
-    }
+    // Prefix rows are rendered separately above this viewport. Keep the complete physical editor
+    // (prefix, input, and helper rows) within the terminal's row count.
+    const ssize_t visible_termh = edit_available_terminal_rows(env, eb);
 
     const editline_viewport_t viewport = editline_viewport_for(
         rows_input, rows_extra, rc.row, visible_termh, env->multiline_max_line_count,
@@ -1899,6 +1984,42 @@ static void edit_clear_with_prompt_prefix(ic_env_t* env, editor_t* eb,
     term_up(env->term, total_rows);
 }
 
+// Only called between editing operations, never from a completion/highlight callback.
+// Keep the editor (including undo, input, hints and cursor) alive while moving its
+// display below the notifications. Nested menus defer this until they return.
+static void edit_flush_notifications(ic_env_t* env, editor_t* eb) {
+    if (env->notifications != NULL && sbuf_len(env->notifications) > 0 &&
+        !env->readline_terminal_suspended) {
+        stringbuf_t* messages = env->notifications;
+        env->notifications = NULL;
+        edit_clear_with_prompt_prefix(env, eb, eb->prompt_prefix_lines);
+        ic_term_abort_input_region(env);
+        term_write(env->term, sbuf_string(messages));
+        sbuf_free(messages);
+
+        term_reset_line_state(env->term);
+        term_start_of_line(env->term);
+        eb->cur_row = 0;
+        eb->cur_rows = 1;
+        eb->input_rows = 1;
+        eb->view_first_row = 0;
+        eb->view_rows = 1;
+        eb->view_input_rows = 1;
+        eb->last_screen_cursor_known = false;
+        redraw_prompt_prefix_lines(env, eb);
+        edit_refresh(env, eb);
+    }
+}
+
+static void edit_process_readline_event(ic_env_t* env) {
+    if (env->readline_event_pending) {
+        env->readline_event_pending = false;
+        if (env->readline_event_callback != NULL) {
+            env->readline_event_callback(env->readline_event_arg);
+        }
+    }
+}
+
 // clear screen and refresh
 static void edit_clear_screen(ic_env_t* env, editor_t* eb) {
     const ssize_t view_rows = eb->view_rows;
@@ -1916,9 +2037,18 @@ static void edit_clear_screen(ic_env_t* env, editor_t* eb) {
 static bool edit_resize(ic_env_t* env, editor_t* eb) {
     // update dimensions
     (void)term_update_dim(env->term);
-    ssize_t newtermw = term_get_width(env->term);
-    if (eb->termw == newtermw)
+    const ssize_t newtermw = term_get_width(env->term);
+    const ssize_t newtermh = term_get_height(env->term);
+    const bool width_changed = (eb->termw != newtermw);
+    const bool height_changed = (eb->termh != newtermh);
+    if (!width_changed && !height_changed)
         return false;
+
+    eb->termh = newtermh;
+    if (!width_changed) {
+        edit_refresh(env, eb);
+        return true;
+    }
 
     // recalculate the row layout assuming the hardwrapping for the new terminal
     // width
@@ -3327,14 +3457,15 @@ static bool apply_default_multiline_start_lines(ic_env_t* env, editor_t* eb) {
     return appended;
 }
 
-static bool insert_initial_input(const char* initial_input, editor_t* eb) {
+static bool insert_initial_input(const char* initial_input, editor_t* eb, size_t cursor_pos,
+                                 bool cursor_pos_set) {
     if (initial_input == NULL) {
         return false;
     }
 
     ssize_t length = ic_strlen(initial_input);
     bool has_trailing_enter = false;
-    while (length > 0) {
+    while (!cursor_pos_set && length > 0) {
         char ch = initial_input[length - 1];
         if (ch == '\n' || ch == '\r') {
             has_trailing_enter = true;
@@ -3349,6 +3480,9 @@ static bool insert_initial_input(const char* initial_input, editor_t* eb) {
         (void)sbuf_append_n(eb->input, initial_input, length);
     }
     eb->pos = sbuf_len(eb->input);
+    if (cursor_pos_set && cursor_pos < to_size_t(eb->pos)) {
+        eb->pos = to_ssize_t(cursor_pos);
+    }
     return has_trailing_enter;
 }
 
@@ -3545,6 +3679,7 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     eb.hint_help = sbuf_new(env->mem);
     eb.history_prefix = sbuf_new(env->mem);
     eb.termw = term_get_width(env->term);
+    eb.termh = term_get_height(env->term);
     eb.pos = 0;
     eb.cur_rows = 1;
     eb.input_rows = 1;
@@ -3632,6 +3767,8 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
 
     // Set this editor as the current active editor
     env->current_editor = &eb;
+    // Catch events that arrived before this readline installed its wakeup channel.
+    env->readline_event_pending = (env->readline_event_callback != NULL);
     edit_reset_mouse_reporting_session(env, &eb, true);
 
     // Insert initial input if present
@@ -3639,9 +3776,13 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     bool initial_requests_submit = false;
 
     if (env->initial_input != NULL) {
-        initial_requests_submit = insert_initial_input(env->initial_input, &eb);
-        // Expand pending abbreviations in pre-seeded buffers (e.g., typeahead with trailing space)
-        (void)edit_expand_abbreviation_if_needed(env, &eb, false);
+        initial_requests_submit = insert_initial_input(
+            env->initial_input, &eb, env->initial_cursor_pos, env->initial_cursor_pos_set);
+        // Expand pending abbreviations in pre-seeded buffers (e.g., typeahead with trailing
+        // space). A caller-supplied cursor means this is an exact editor-state restore.
+        if (!env->initial_cursor_pos_set) {
+            (void)edit_expand_abbreviation_if_needed(env, &eb, false);
+        }
     } else {
         seeded_multiline_lines = apply_default_multiline_start_lines(env, &eb);
     }
@@ -3687,10 +3828,14 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     bool ctrl_c_pressed = false;
     bool ctrl_d_pressed = false;
     bool stop_event_received = false;
+    bool idle_timeout_received = false;
+    bool hint_delay_satisfied = false;
+    edit_note_input_activity(env, &eb);
 
 edit_loop_entry:
     if (!initial_requests_submit) {
         while (true) {
+            edit_process_readline_event(env);
             if (edit_update_status_message(env, &eb)) {
                 if (eb.refresh_suppressed) {
                     eb.refresh_pending = true;
@@ -3698,6 +3843,7 @@ edit_loop_entry:
                     edit_refresh(env, &eb);
                 }
             }
+            edit_flush_notifications(env, &eb);
 
             if (eb.request_submit) {
                 // Clear history preview when submitting
@@ -3731,7 +3877,61 @@ edit_loop_entry:
             } else {
                 // read a character
                 term_flush(env->term);
-                if (env->hint_delay <= 0 || sbuf_len(eb.hint) == 0) {
+                if (env->idle_timeout > 0) {
+                    while (true) {
+                        long idle_remaining = edit_milliseconds_until(eb.idle_deadline_ms);
+                        if (idle_remaining == 0) {
+                            idle_timeout_received = true;
+                            c = KEY_NONE;
+                            break;
+                        }
+
+                        long wait_ms = idle_remaining;
+                        bool waiting_for_hint =
+                            (!hint_delay_satisfied && env->hint_delay > 0 && sbuf_len(eb.hint) > 0);
+                        int64_t hint_deadline_ms = eb.last_activity_ms + (int64_t)env->hint_delay;
+                        if (waiting_for_hint) {
+                            long hint_remaining = edit_milliseconds_until(hint_deadline_ms);
+                            if (hint_remaining == 0) {
+                                edit_refresh(env, &eb);
+                                hint_delay_satisfied = true;
+                                continue;
+                            }
+                            if (hint_remaining < wait_ms) {
+                                wait_ms = hint_remaining;
+                            }
+                        }
+
+                        if (tty_read_timeout(env->tty, wait_ms, &c)) {
+                            if (c != KEY_EVENT_RESIZE && c != KEY_EVENT_READLINE) {
+                                edit_note_input_activity(env, &eb);
+                                hint_delay_satisfied = false;
+                                if (waiting_for_hint) {
+                                    sbuf_clear(eb.hint);
+                                    sbuf_clear(eb.hint_help);
+                                }
+                            }
+                            break;
+                        }
+
+                        if (edit_milliseconds_until(eb.idle_deadline_ms) == 0) {
+                            idle_timeout_received = true;
+                            c = KEY_NONE;
+                            break;
+                        }
+                        if (waiting_for_hint && edit_milliseconds_until(hint_deadline_ms) == 0) {
+                            edit_refresh(env, &eb);
+                            hint_delay_satisfied = true;
+                            continue;
+                        }
+
+                        // An asynchronous terminal notification woke the reader.
+                        // Let the normal resize/event path process it without
+                        // treating it as user activity.
+                        c = KEY_NONE;
+                        break;
+                    }
+                } else if (env->hint_delay <= 0 || sbuf_len(eb.hint) == 0) {
                     // blocking read
                     c = tty_read(env->tty);
                 } else {
@@ -3743,13 +3943,17 @@ edit_loop_entry:
                             edit_refresh(env, &eb);
                         }
                         c = tty_read(env->tty);
-                    } else {
+                    } else if (c != KEY_EVENT_READLINE) {
                         // clear the pending hint if we got input before the delay
                         // expired
                         sbuf_clear(eb.hint);
                         sbuf_clear(eb.hint_help);
                     }
                 }
+            }
+
+            if (idle_timeout_received) {
+                break;
             }
 
             // update terminal in case of a resize (also detect polling changes)
@@ -3759,6 +3963,11 @@ edit_loop_entry:
             }
             if (should_resize) {
                 (void)edit_resize(env, &eb);
+            }
+
+            if (c == KEY_EVENT_READLINE) {
+                env->readline_event_pending = true;
+                continue;
             }
 
             // clear hint only after a potential resize (so resize row calculations
@@ -4110,10 +4319,15 @@ edit_loop_entry:
 
     // goto end
 
-    eb.pos = sbuf_len(eb.input);
+    edit_process_readline_event(env);
+    edit_flush_notifications(env, &eb);
+
+    if (!idle_timeout_received) {
+        eb.pos = sbuf_len(eb.input);
+    }
 
     // Final chance to expand pending abbreviations (e.g., buffered typeahead ending in space)
-    if (!ctrl_c_pressed && !ctrl_d_pressed && c != KEY_EVENT_STOP) {
+    if (!idle_timeout_received && !ctrl_c_pressed && !ctrl_d_pressed && c != KEY_EVENT_STOP) {
         (void)edit_expand_abbreviation_if_needed(env, &eb, false);
     }
 
@@ -4126,15 +4340,23 @@ edit_loop_entry:
         eb.force_linear_line_numbers = true;
     }
 
-    // refresh once more but without brace matching
-    bool bm = env->no_bracematch;
-    env->no_bracematch = true;
-    edit_refresh(env, &eb);
-    env->no_bracematch = bm;
+    if (idle_timeout_received) {
+        edit_clear_with_prompt_prefix(env, &eb, eb.prompt_prefix_lines);
+        term_flush(env->term);
+    } else {
+        // refresh once more but without brace matching
+        bool bm = env->no_bracematch;
+        env->no_bracematch = true;
+        edit_refresh(env, &eb);
+        env->no_bracematch = bm;
+        edit_flush_notifications(env, &eb);
+    }
 
     // save result
     char* res;
-    if (ctrl_d_pressed) {
+    if (idle_timeout_received) {
+        res = sbuf_strdup(eb.input);
+    } else if (ctrl_d_pressed) {
         res = mem_strdup(env->mem, IC_READLINE_TOKEN_CTRL_D);
     } else if (ctrl_c_pressed) {
         res = mem_strdup(env->mem, IC_READLINE_TOKEN_CTRL_C);
@@ -4147,7 +4369,10 @@ edit_loop_entry:
         res = sbuf_strdup(eb.input);
     }
 
-    if (ctrl_d_pressed || (c == KEY_CTRL_D && sbuf_len(eb.input) == 0)) {
+    env->last_readline_cursor_pos = to_size_t(eb.pos);
+    if (idle_timeout_received) {
+        env->last_readline_disposition = IC_READLINE_DISPOSITION_IDLE;
+    } else if (ctrl_d_pressed || (c == KEY_CTRL_D && sbuf_len(eb.input) == 0)) {
         env->last_readline_disposition = IC_READLINE_DISPOSITION_EOF;
     } else if (ctrl_c_pressed || c == KEY_CTRL_C) {
         env->last_readline_disposition = (stop_event_received ? IC_READLINE_DISPOSITION_STOP
@@ -4161,8 +4386,10 @@ edit_loop_entry:
     }
 
     // update history in memory (file saving handled after execution)
-    (void)history_update(env->history, sbuf_string(eb.input));
-    if (res == NULL || sbuf_len(eb.input) <= 1) {
+    if (!idle_timeout_received) {
+        (void)history_update(env->history, sbuf_string(eb.input));
+    }
+    if (idle_timeout_received || res == NULL || sbuf_len(eb.input) <= 1) {
         ic_history_remove_last();
     }
 
@@ -4199,7 +4426,9 @@ ic_public bool ic_set_buffer(const char* buffer) {
     eb->modified = true;
 
     // Refresh the display
-    edit_refresh(env, eb);
+    if (!env->readline_terminal_suspended) {
+        edit_refresh(env, eb);
+    }
 
     return true;
 }
@@ -4211,6 +4440,16 @@ ic_public const char* ic_get_buffer(void) {
 
     editor_t* eb = env->current_editor;
     return sbuf_string(eb->input);
+}
+
+ic_public bool ic_execute_key_action(ic_key_action_t action) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL || env->current_editor == NULL || action == IC_KEY_ACTION_RUNOFF ||
+        action < IC_KEY_ACTION_NONE || action >= IC_KEY_ACTION__MAX) {
+        return false;
+    }
+
+    return key_action_execute(env, env->current_editor, action, KEY_NONE);
 }
 
 ic_public bool ic_get_cursor_pos(size_t* out_pos) {
@@ -4237,6 +4476,81 @@ ic_public bool ic_set_cursor_pos(size_t pos) {
     }
 
     eb->pos = (ssize_t)pos;
+    if (!env->readline_terminal_suspended) {
+        edit_refresh(env, eb);
+    }
+    return true;
+}
+
+ic_public bool ic_suspend_readline_terminal(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL || env->current_editor == NULL || env->tty == NULL || env->term == NULL ||
+        env->readline_terminal_suspended) {
+        return false;
+    }
+
+    editor_t* eb = env->current_editor;
+    env->suspended_mouse_reporting_enabled = eb->mouse_reporting_enabled;
+    env->suspended_focus_reporting_enabled = eb->mouse_focus_reporting_enabled;
+
+    edit_set_mouse_focus_reporting(env, eb, false);
+    edit_set_mouse_reporting_enabled(env, eb, false);
+    if (env->bracketed_paste_enabled && term_is_interactive(env->term)) {
+        term_write(env->term, "\x1b[?2004l");
+        env->bracketed_paste_enabled = false;
+    }
+    term_attr_reset(env->term);
+    term_flush(env->term);
+
+    if (env->typeahead_enabled) {
+        tty_enable_typeahead_capture_mode(env->tty, false);
+    }
+    term_end_raw(env->term, false);
+    tty_end_raw(env->tty);
+    env->readline_terminal_suspended = true;
+    return true;
+}
+
+ic_public bool ic_resume_readline_terminal(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL || env->current_editor == NULL || env->tty == NULL || env->term == NULL ||
+        !env->readline_terminal_suspended) {
+        return false;
+    }
+
+    editor_t* eb = env->current_editor;
+    if (!tty_start_raw(env->tty)) {
+        return false;
+    }
+    term_start_raw(env->term);
+    if (env->typeahead_enabled) {
+        tty_enable_typeahead_capture_mode(env->tty, true);
+    }
+    if (term_is_interactive(env->term)) {
+        term_write(env->term, "\x1b[?2004h");
+        env->bracketed_paste_enabled = true;
+    }
+
+    env->readline_terminal_suspended = false;
+    env->readline_event_pending = (env->readline_event_callback != NULL);
+    if (env->suspended_mouse_reporting_enabled) {
+        edit_set_mouse_reporting_enabled(env, eb, true);
+    }
+    if (env->suspended_focus_reporting_enabled) {
+        edit_set_mouse_focus_reporting(env, eb, true);
+    }
+    env->suspended_mouse_reporting_enabled = false;
+    env->suspended_focus_reporting_enabled = false;
+
+    term_reset_line_state(env->term);
+    term_start_of_line(env->term);
+    eb->cur_row = 0;
+    eb->cur_rows = 1;
+    eb->input_rows = 1;
+    eb->view_first_row = 0;
+    eb->view_rows = 1;
+    eb->view_input_rows = 1;
+    edit_write_prompt(env, eb, 0, false, 0, 0, 0, false);
     edit_refresh(env, eb);
     return true;
 }

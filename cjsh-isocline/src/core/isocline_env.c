@@ -142,6 +142,7 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
 
     // Set default enabled features
     env->hint_delay = 0;                        // hint delay (0)
+    env->idle_timeout = 0;                      // idle timeout disabled
     env->spell_correct = true;                  // completion spell fixing
     env->spell_correct_on_enter = false;        // enter-submit spell correction
     env->show_line_numbers = true;              // line numbers
@@ -171,6 +172,9 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->mouse_reporting_status_line_enabled = true;  // show indicator line when mouse is active
     env->inline_right_prompt_follows_cursor = false;  // keep right prompt anchored at row 0
     env->bracketed_paste_enabled = false;
+    env->readline_terminal_suspended = false;
+    env->suspended_mouse_reporting_enabled = false;
+    env->suspended_focus_reporting_enabled = false;
     env->typeahead_enabled = false;                // callers opt in for interactive shell sessions
     env->terminal_region_marking_enabled = false;  // callers opt in to OSC 133 shell integration
     env->terminal_region_state = 0;
@@ -224,6 +228,7 @@ static void ic_env_free(ic_env_t* env) {
     bbcode_free(env->bbcode);
     sbuf_free(env->typeahead_input_buffer);
     sbuf_free(env->typeahead_pending_raw_bytes);
+    sbuf_free(env->notifications);
     term_free(env->term);
     tty_free(env->tty);
     if (env->abbreviations != NULL) {
@@ -271,6 +276,10 @@ static void ic_env_free(ic_env_t* env) {
 
 static ic_env_t* rpenv = NULL;
 static bool ic_default_abbreviations_initialized = false;
+
+ic_private ic_env_t* ic_get_env_if_initialized(void) {
+    return rpenv;
+}
 
 static void ic_atexit(void) {
     if (rpenv != NULL) {
@@ -324,7 +333,8 @@ ic_private const char* ic_env_get_whitespace_marker(ic_env_t* env) {
     return env->whitespace_marker;
 }
 
-ic_private void ic_env_set_initial_input(ic_env_t* env, const char* initial_input) {
+ic_private void ic_env_set_initial_input(ic_env_t* env, const char* initial_input,
+                                         size_t cursor_pos, bool cursor_pos_set) {
     if (env == NULL)
         return;
     mem_free(env->mem, (void*)env->initial_input);
@@ -332,6 +342,8 @@ ic_private void ic_env_set_initial_input(ic_env_t* env, const char* initial_inpu
     if (initial_input != NULL) {
         env->initial_input = mem_strdup(env->mem, initial_input);
     }
+    env->initial_cursor_pos = cursor_pos;
+    env->initial_cursor_pos_set = cursor_pos_set;
 }
 
 ic_private void ic_env_clear_initial_input(ic_env_t* env) {
@@ -339,4 +351,6 @@ ic_private void ic_env_clear_initial_input(ic_env_t* env) {
         return;
     mem_free(env->mem, (void*)env->initial_input);
     env->initial_input = NULL;
+    env->initial_cursor_pos = 0;
+    env->initial_cursor_pos_set = false;
 }

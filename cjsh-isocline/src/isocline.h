@@ -61,6 +61,8 @@ typedef enum ic_readline_disposition_e {
     IC_READLINE_DISPOSITION_STOP,
     /// Readline encountered an unrecoverable error.
     IC_READLINE_DISPOSITION_ERROR,
+    /// Readline paused because the configured idle timeout elapsed.
+    IC_READLINE_DISPOSITION_IDLE,
 } ic_readline_disposition_t;
 
 /// Structured readline return value that includes terminal state metadata.
@@ -75,6 +77,8 @@ typedef struct ic_readline_result_s {
     bool tty_active;
     /// True when the TTY backend detected a lost terminal connection.
     bool tty_lost;
+    /// Cursor position in `input` when readline returned.
+    size_t cursor_pos;
 } ic_readline_result_t;
 
 /*! \mainpage
@@ -142,8 +146,15 @@ char* ic_readline(const char* prompt_text, const char* inline_right_text,
 ic_readline_result_t ic_readline_with_status(const char* prompt_text, const char* inline_right_text,
                                              const char* initial_input);
 
+/// Read input with an explicitly positioned initial cursor.
+/// `initial_cursor_pos` is clamped to the length of `initial_input`.
+ic_readline_result_t ic_readline_with_status_at_cursor(const char* prompt_text,
+                                                       const char* inline_right_text,
+                                                       const char* initial_input,
+                                                       size_t initial_cursor_pos);
+
 /// Convert an ic_readline_disposition_t into a stable lowercase string.
-/// Returns one of: "submit", "interrupt", "eof", "stop", "error".
+/// Returns one of: "submit", "interrupt", "eof", "stop", "idle", "error".
 const char* ic_readline_disposition_name(ic_readline_disposition_t disposition);
 
 /// Queue a single key event so it is processed before the next read.
@@ -153,6 +164,22 @@ bool ic_push_key_event(ic_keycode_t key);
 /// Notify isocline that the terminal resized.
 /// Safe to call from a signal handler; triggers a wakeup of the input loop.
 void ic_notify_resize(void);
+
+/// Wake readline to run its event callback between editing operations.
+/// Safe to call from a POSIX signal handler; preserves errno. Events are coalesced
+/// and deferred until an open menu or bracketed paste finishes.
+void ic_notify_readline(void);
+
+typedef void(ic_readline_event_fun_t)(void* arg);
+/// The callback runs on the readline thread and may queue notifications. It must
+/// not write directly to the terminal or recursively call readline.
+void ic_set_readline_event_callback(ic_readline_event_fun_t* callback, void* arg);
+
+/// Copy text for display above the active prompt at the next safe editing boundary.
+/// Call only on the readline thread, including from completion/render callbacks.
+/// Text is not interpreted as BBCode; a trailing newline is added if needed.
+/// Returns false if no editor owns the terminal or the text could not be queued.
+bool ic_queue_notification(const char* text);
 
 /// Callback function type for runoff key events.
 /// This callback is invoked when a key is bound to `IC_KEY_ACTION_RUNOFF`.
@@ -171,6 +198,16 @@ typedef bool(ic_unhandled_key_fun_t)(ic_keycode_t key, void* arg);
 /// @param callback The callback function to invoke for runoff keys, or NULL to disable
 /// @param arg User-provided argument that will be passed to the callback
 void ic_set_unhandled_key_handler(ic_unhandled_key_fun_t* callback, void* arg);
+
+/// Temporarily release the terminal owned by an active readline editor.
+/// Use this before launching an external interactive program from a runoff callback.
+/// @returns true when an active editor was suspended, false otherwise.
+bool ic_suspend_readline_terminal(void);
+
+/// Reacquire and redraw a readline editor suspended with
+/// `ic_suspend_readline_terminal()`.
+/// @returns true when a suspended editor was resumed, false otherwise.
+bool ic_resume_readline_terminal(void);
 
 /// An item displayed by ic_show_menu().
 typedef struct ic_menu_item_s {
@@ -962,6 +999,13 @@ bool ic_enable_spell_correct_on_enter(bool enable);
 /// default).
 long ic_set_hint_delay(long delay_ms);
 
+/// Return the current hint display delay in milliseconds.
+long ic_get_hint_delay(void);
+
+/// Set the inactivity timeout for the active readline loop in milliseconds.
+/// Zero disables idle timeouts. Returns the previous timeout.
+long ic_set_idle_timeout(long timeout_ms);
+
 /// Disable or enable syntax highlighting (enabled by default).
 /// This applies regardless whether a syntax highlighter callback was set
 /// (`ic_set_highlighter`) Returns the previous setting.
@@ -1044,6 +1088,13 @@ ic_key_action_t ic_key_action_from_name(const char* name);
 /// @param action The key action.
 /// @returns The name of the action, or NULL if invalid.
 const char* ic_key_action_name(ic_key_action_t action);
+
+/// Execute a named editor action in the active readline session.
+/// This is intended for command-backed widgets that need to delegate to a
+/// built-in editing behavior without synthesizing a key press.
+/// @param action The editor action to execute.
+/// @returns `true` if an editor is active and the action was handled.
+bool ic_execute_key_action(ic_key_action_t action);
 
 /// Parse a key specification string into a keycode.
 /// @param spec The key specification string (e.g., "ctrl-c", "alt-x").
