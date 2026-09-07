@@ -310,8 +310,12 @@ ic_status_hint_mode_t ic_get_status_hint_mode(void);
 /// - `IC_MOUSE_CLICKING_DISABLED`: never capture mouse events, including in menus.
 /// - `IC_MOUSE_CLICKING_SIMPLE`: start with mouse capture enabled; only manual toggle changes it.
 /// - `IC_MOUSE_CLICKING_SMART`: start enabled and auto-suspend on wheel input or selection starts
-///   above the editor, in prompt/gutter cells, or in status/helper rows; then auto-resume on
-///   keyboard/focus-in input.
+///   above the editor, in prompt/gutter cells, in status/helper rows, or on left-button dragging;
+///   then auto-resume on a reported left-button release or keyboard/focus-in input. Resuming on
+///   release preserves the display until the next click/key. Disabling capture also stops release
+///   reports, so resuming on release is best-effort; keyboard input remains the portable fallback.
+///   Native selection during the same drag depends on the terminal; some terminals require a
+///   second drag after capture is released.
 /// - `IC_MOUSE_CLICKING_MENU_ONLY`: leave editing capture off and acquire it only while an
 ///   expanded completion, history, or command-palette menu is open.
 /// While a menu owns mouse capture, clicking outside its selectable items temporarily releases
@@ -858,8 +862,9 @@ ic_menu_highlight_mode_t ic_set_menu_highlight_mode(ic_menu_highlight_mode_t mod
 /// Returns the current completion/history menu item highlighting mode.
 ic_menu_highlight_mode_t ic_get_menu_highlight_mode(void);
 
-/// Disable or enable automatic identation of continuation lines in multiline
-/// input so it aligns with the initial prompt. (enabled by default)
+/// Disable or enable automatic indentation of continuation lines in multiline
+/// input. This aligns continuation prompts and indents lines created by
+/// automatic continuation. (enabled by default)
 /// Returns the previous setting.
 bool ic_enable_multiline_indent(bool enable);
 
