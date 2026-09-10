@@ -32,12 +32,20 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 
+#include <assert.h>
 #include <ctype.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 #include <time.h>
+#include "attr.h"
+#include "bbcode.h"
+#include "fuzzy_match.h"  // IWYU pragma: keep
+#include "keybindings.h"
+#include "keycodes.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -50,7 +58,6 @@
 #include "editline_viewport.h"
 #include "env.h"
 #include "env_internal.h"
-#include "fuzzy_match.h"
 #include "highlight.h"
 #include "history.h"
 #include "isocline.h"
@@ -124,7 +131,7 @@ typedef struct editor_s {
     bool mouse_left_button_down;              // track click origins for terminals without motion
     ssize_t mouse_left_press_column;
     ssize_t mouse_left_press_row;
-    alloc_t* mem;                             // allocator
+    alloc_t* mem;  // allocator
     // caches
     attrbuf_t* attrs;  // reuse attribute buffers
     attrbuf_t* attrs_extra;
@@ -186,7 +193,7 @@ static void edit_show_help(ic_env_t* env, editor_t* eb);
 static void edit_cursor_left(ic_env_t* env, editor_t* eb);
 static void edit_cursor_right(ic_env_t* env, editor_t* eb);
 static void edit_cursor_row_up(ic_env_t* env, editor_t* eb);
-static void edit_cursor_row_up_with_history_spell(ic_env_t* env, editor_t* eb);
+static void edit_history_prev_with_spell(ic_env_t* env, editor_t* eb);
 static void edit_cursor_row_down(ic_env_t* env, editor_t* eb);
 static void edit_cursor_line_start(ic_env_t* env, editor_t* eb);
 static void edit_cursor_line_end(ic_env_t* env, editor_t* eb);
@@ -247,7 +254,11 @@ static bool key_action_execute(ic_env_t* env, editor_t* eb, ic_key_action_t acti
             edit_command_palette(env, eb);
             return true;
         case IC_KEY_ACTION_HISTORY_PREV:
-            edit_history_prev(env, eb);
+            if (key == WITH_SHIFT(KEY_UP)) {
+                edit_history_prev_with_spell(env, eb);
+            } else {
+                edit_history_prev(env, eb);
+            }
             return true;
         case IC_KEY_ACTION_HISTORY_NEXT:
             edit_history_next(env, eb);
@@ -275,11 +286,7 @@ static bool key_action_execute(ic_env_t* env, editor_t* eb, ic_key_action_t acti
             }
             return true;
         case IC_KEY_ACTION_CURSOR_UP:
-            if ((KEY_MODS(key) & KEY_MOD_SHIFT) != 0 && KEY_NO_MODS(key) == KEY_UP) {
-                edit_cursor_row_up_with_history_spell(env, eb);
-            } else {
-                edit_cursor_row_up(env, eb);
-            }
+            edit_cursor_row_up(env, eb);
             return true;
         case IC_KEY_ACTION_CURSOR_DOWN:
             edit_cursor_row_down(env, eb);
@@ -390,12 +397,14 @@ static bool edit_key_resets_last_arg_state(const ic_env_t* env, code_t key) {
 }
 
 static bool key_binding_execute(ic_env_t* env, editor_t* eb, code_t key) {
-    if (env == NULL || env->key_binding_count <= 0)
+    if (env == NULL || env->key_binding_count <= 0) {
         return false;
+    }
     ic_key_action_t action = IC_KEY_ACTION__MAX;
     if (key_binding_lookup_action(env, key, &action)) {
-        if (action == IC_KEY_ACTION_NONE)
+        if (action == IC_KEY_ACTION_NONE) {
             return true;
+        }
         if (action == IC_KEY_ACTION_RUNOFF) {
             // Call the unhandled key handler directly
             if (env->unhandled_key_handler != NULL) {
@@ -478,6 +487,8 @@ static void edit_note_input_activity(ic_env_t* env, editor_t* eb) {
 // Menus run nested input loops, so they must share the editor's idle deadline instead of
 // blocking indefinitely. A false return tells the menu to cancel and return to the main loop,
 // which then completes the readline with an idle disposition.
+static void edit_process_readline_event(ic_env_t* env);
+
 static bool edit_menu_read_key(ic_env_t* env, editor_t* eb, code_t* code) {
     if (env == NULL || eb == NULL || code == NULL || env->tty == NULL) {
         return false;
@@ -491,7 +502,14 @@ static bool edit_menu_read_key(ic_env_t* env, editor_t* eb, code_t* code) {
         if (tty_read_timeout(env->tty, idle_remaining, code)) {
             if (*code == KEY_EVENT_READLINE) {
                 env->readline_event_pending = true;
+                edit_process_readline_event(env);
                 continue;
+            }
+            if (*code == KEY_EVENT_STOP || *code == KEY_EVENT_INTERRUPT) {
+                // Unwind nested menus before the outer editor handles signals.
+                tty_code_pushback(env->tty, *code);
+                *code = KEY_ESC;
+                return false;
             }
             if (*code != KEY_EVENT_RESIZE) {
                 edit_note_input_activity(env, eb);
@@ -507,6 +525,7 @@ static bool edit_menu_read_key(ic_env_t* env, editor_t* eb, code_t* code) {
 ic_private char* ic_editline(ic_env_t* env, const char* prompt_text,
                              const char* inline_right_text) {
     (void)tty_start_raw(env->tty);
+    tty_enable_typeahead_capture_mode(env->tty, env->typeahead_enabled);
     term_start_raw(env->term);
     char* line = edit_line(env, prompt_text, inline_right_text);
     const bool idle_timeout = (env->last_readline_disposition == IC_READLINE_DISPOSITION_IDLE);
@@ -545,8 +564,9 @@ static void editor_undo_capture(editor_t* eb) {
 }
 
 static void editor_undo_forget(editor_t* eb) {
-    if (eb->disable_undo)
+    if (eb->disable_undo) {
         return;
+    }
     const char* input = NULL;
     ssize_t pos = 0;
     (void)editstate_restore(eb->mem, &eb->undo, &input, &pos);
@@ -554,16 +574,19 @@ static void editor_undo_forget(editor_t* eb) {
 }
 
 static void editor_restore(editor_t* eb, editstate_t** from, editstate_t** to) {
-    if (eb->disable_undo)
+    if (eb->disable_undo) {
         return;
-    if (*from == NULL)
+    }
+    if (*from == NULL) {
         return;
+    }
     const char* input;
     if (to != NULL) {
         editor_capture(eb, to);
     }
-    if (!editstate_restore(eb->mem, from, &input, &eb->pos))
+    if (!editstate_restore(eb->mem, from, &input, &eb->pos)) {
         return;
+    }
     sbuf_replace(eb->input, input);
     mem_free(eb->mem, input);
     eb->modified = false;
@@ -676,7 +699,8 @@ static void edit_get_prompt_width(ic_env_t* env, editor_t* eb, bool in_extra, ss
 static ssize_t edit_get_rowcol(ic_env_t* env, editor_t* eb, rowcol_t* rc) {
     ssize_t promptw, cpromptw;
     edit_get_prompt_width(env, eb, false, &promptw, &cpromptw);
-    return sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw, eb->pos, rc);
+    return sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw, env->line_wrap_marker_width,
+                              eb->pos, rc);
 }
 
 static ssize_t edit_available_terminal_rows(ic_env_t* env, const editor_t* eb) {
@@ -706,9 +730,11 @@ static ssize_t edit_visible_input_row_count(ic_env_t* env, editor_t* eb, ssize_t
 static void edit_set_pos_at_rowcol(ic_env_t* env, editor_t* eb, ssize_t row, ssize_t col) {
     ssize_t promptw, cpromptw;
     edit_get_prompt_width(env, eb, false, &promptw, &cpromptw);
-    ssize_t pos = sbuf_get_pos_at_rc(eb->input, eb->termw, promptw, cpromptw, row, col);
-    if (pos < 0)
+    ssize_t pos = sbuf_get_pos_at_rc(eb->input, eb->termw, promptw, cpromptw,
+                                     env->line_wrap_marker_width, row, col);
+    if (pos < 0) {
         return;
+    }
     eb->pos = pos;
     edit_refresh_hint(env, eb);
 }
@@ -870,8 +896,9 @@ static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb, const char* ren
     }
 
     rowcol_t end_rc = {0};
-    ssize_t input_rows = sbuf_get_rc_at_pos(display_input, eb->termw, promptw, cpromptw,
-                                            sbuf_len(display_input), &end_rc);
+    ssize_t input_rows =
+        sbuf_get_rc_at_pos(display_input, eb->termw, promptw, cpromptw, env->line_wrap_marker_width,
+                           sbuf_len(display_input), &end_rc);
     if (target_row >= input_rows) {
         sbuf_free(display_input_with_hint);
         return false;
@@ -883,8 +910,8 @@ static bool edit_handle_mouse_click(ic_env_t* env, editor_t* eb, const char* ren
         target_col = 0;
     }
 
-    ssize_t new_pos =
-        sbuf_get_pos_at_rc(display_input, eb->termw, promptw, cpromptw, target_row, target_col);
+    ssize_t new_pos = sbuf_get_pos_at_rc(display_input, eb->termw, promptw, cpromptw,
+                                         env->line_wrap_marker_width, target_row, target_col);
     if (new_pos < 0) {
         sbuf_free(display_input_with_hint);
         return false;
@@ -953,10 +980,12 @@ static ssize_t edit_find_word_start(const char* input, ssize_t pos) {
     ssize_t start = pos;
     while (start > 0) {
         ssize_t prev = str_prev_ofs(input, start, NULL);
-        if (prev <= 0)
+        if (prev <= 0) {
             break;
-        if (ic_char_is_separator(input + start - prev, (long)prev))
+        }
+        if (ic_char_is_separator(input + start - prev, (long)prev)) {
             break;
+        }
         start -= prev;
     }
     return start;
@@ -965,29 +994,37 @@ static ssize_t edit_find_word_start(const char* input, ssize_t pos) {
 static bool edit_completion_is_current_word_spell(ic_env_t* env, editor_t* eb, ssize_t index,
                                                   const char** replacement_out,
                                                   ssize_t* word_start_out) {
-    if (replacement_out != NULL)
+    if (replacement_out != NULL) {
         *replacement_out = NULL;
-    if (word_start_out != NULL)
+    }
+    if (word_start_out != NULL) {
         *word_start_out = 0;
-    if (env == NULL || eb == NULL || eb->input == NULL || env->completions == NULL || eb->pos <= 0)
+    }
+    if (env == NULL || eb == NULL || eb->input == NULL || env->completions == NULL ||
+        eb->pos <= 0) {
         return false;
+    }
 
     const char* source = completions_get_source(env->completions, index);
-    if (source == NULL || strcmp(source, "spell") != 0)
+    if (source == NULL || strcmp(source, "spell") != 0) {
         return false;
+    }
 
     const char* input = sbuf_string(eb->input);
-    if (input == NULL)
+    if (input == NULL) {
         return false;
+    }
 
     ssize_t input_len = ic_strlen(input);
     ssize_t next_len = str_next_ofs(input, input_len, eb->pos, NULL);
-    if (next_len > 0 && !ic_char_is_separator(input + eb->pos, (long)next_len))
+    if (next_len > 0 && !ic_char_is_separator(input + eb->pos, (long)next_len)) {
         return false;
+    }
 
     ssize_t word_start = edit_find_word_start(input, eb->pos);
-    if (word_start < 0 || word_start >= eb->pos)
+    if (word_start < 0 || word_start >= eb->pos) {
         return false;
+    }
 
     const char* replacement = NULL;
     ssize_t replacement_start = 0;
@@ -997,28 +1034,34 @@ static bool edit_completion_is_current_word_spell(ic_env_t* env, editor_t* eb, s
         return false;
     }
 
-    if (replacement_out != NULL)
+    if (replacement_out != NULL) {
         *replacement_out = replacement;
-    if (word_start_out != NULL)
+    }
+    if (word_start_out != NULL) {
         *word_start_out = word_start;
+    }
     return true;
 }
 
 static inline char ascii_tolower_char(char c) {
-    if (c >= 'A' && c <= 'Z')
+    if (c >= 'A' && c <= 'Z') {
         return (char)(c + ('a' - 'A'));
+    }
     return c;
 }
 
 static size_t levenshtein_casefold(alloc_t* mem, const char* left, const char* right) {
-    if (left == NULL || right == NULL)
+    if (left == NULL || right == NULL) {
         return SIZE_MAX;
+    }
     size_t len_left = strlen(left);
     size_t len_right = strlen(right);
-    if (len_left == 0)
+    if (len_left == 0) {
         return len_right;
-    if (len_right == 0)
+    }
+    if (len_right == 0) {
         return len_left;
+    }
 
     size_t* prev = mem_malloc_tp_n(mem, size_t, len_right + 1);
     size_t* curr = mem_malloc_tp_n(mem, size_t, len_right + 1);
@@ -1042,10 +1085,12 @@ static size_t levenshtein_casefold(alloc_t* mem, const char* left, const char* r
             size_t insertion = curr[j - 1] + 1;
             size_t substitution = prev[j - 1] + cost;
             size_t best = deletion;
-            if (insertion < best)
+            if (insertion < best) {
                 best = insertion;
-            if (substitution < best)
+            }
+            if (substitution < best) {
                 best = substitution;
+            }
             curr[j] = best;
         }
         size_t* tmp = prev;
@@ -1061,40 +1106,88 @@ static size_t levenshtein_casefold(alloc_t* mem, const char* left, const char* r
 
 static size_t edit_spell_threshold(size_t left_len, size_t right_len) {
     size_t max_len = (left_len > right_len ? left_len : right_len);
-    if (max_len <= 2)
+    if (max_len <= 2) {
         return 1;
-    if (max_len <= 4)
+    }
+    if (max_len <= 4) {
         return 1;
-    if (max_len <= 6)
+    }
+    if (max_len <= 6) {
         return 2;
+    }
     return max_len / 2;
 }
 
+static ssize_t edit_best_spell_candidate(ic_env_t* env, const char* original_word, ssize_t count,
+                                         const char* required_source) {
+    ssize_t best_index = -1;
+    size_t best_distance = SIZE_MAX;
+    long best_length_diff = LONG_MAX;
+    const ssize_t original_len = ic_strlen(original_word);
+    ssize_t best_length = 0;
+    for (ssize_t i = 0; i < count; ++i) {
+        if (required_source != NULL) {
+            const char* source = completions_get_source(env->completions, i);
+            if (source == NULL || strcmp(source, required_source) != 0) {
+                continue;
+            }
+        }
+        const char* replacement = completions_get_replacement(env->completions, i);
+        if (replacement == NULL || *replacement == '\0') {
+            continue;
+        }
+        const size_t distance = levenshtein_casefold(env->mem, original_word, replacement);
+        if (distance == SIZE_MAX) {
+            continue;
+        }
+        const ssize_t length = ic_strlen(replacement);
+        const long length_diff = labs((long)length - (long)original_len);
+        if (distance < best_distance ||
+            (distance == best_distance && length_diff < best_length_diff)) {
+            best_index = i;
+            best_distance = distance;
+            best_length_diff = length_diff;
+            best_length = length;
+        }
+    }
+    return best_index >= 0 &&
+                   best_distance <= edit_spell_threshold((size_t)original_len, (size_t)best_length)
+               ? best_index
+               : -1;
+}
+
 static bool edit_try_spell_correct(ic_env_t* env, editor_t* eb) {
-    if (!env->spell_correct)
+    if (!env->spell_correct) {
         return false;
+    }
 
     const char* input = sbuf_string(eb->input);
-    if (input == NULL)
+    if (input == NULL) {
         return false;
+    }
     ssize_t pos = eb->pos;
-    if (pos <= 0)
+    if (pos <= 0) {
         return false;
+    }
 
     ssize_t prev = str_prev_ofs(input, pos, NULL);
-    if (prev <= 0)
+    if (prev <= 0) {
         return false;
-    if (ic_char_is_separator(input + pos - prev, (long)prev))
+    }
+    if (ic_char_is_separator(input + pos - prev, (long)prev)) {
         return false;
+    }
 
     ssize_t word_start = edit_find_word_start(input, pos);
-    if (word_start < 0 || word_start >= pos)
+    if (word_start < 0 || word_start >= pos) {
         return false;
+    }
 
     ssize_t word_len = pos - word_start;
     char* original_word = mem_strndup(env->mem, input + word_start, word_len);
-    if (original_word == NULL)
+    if (original_word == NULL) {
         return false;
+    }
 
     editor_start_modify(eb);
     sbuf_delete_from_to(eb->input, word_start, pos);
@@ -1109,38 +1202,8 @@ static bool edit_try_spell_correct(ic_env_t* env, editor_t* eb) {
         return false;
     }
 
-    ssize_t best_index = -1;
-    size_t best_distance = SIZE_MAX;
-    long best_length_diff = LONG_MAX;
-    ssize_t original_len = ic_strlen(original_word);
-
-    for (ssize_t i = 0; i < candidate_count; ++i) {
-        const char* replacement = completions_get_replacement(env->completions, i);
-        if (replacement == NULL || *replacement == '\0')
-            continue;
-        size_t distance = levenshtein_casefold(env->mem, original_word, replacement);
-        if (distance == SIZE_MAX)
-            continue;
-        ssize_t replacement_len = ic_strlen(replacement);
-        long len_diff = labs((long)replacement_len - (long)original_len);
-        if (distance < best_distance ||
-            (distance == best_distance && len_diff < best_length_diff)) {
-            best_distance = distance;
-            best_length_diff = len_diff;
-            best_index = i;
-        }
-    }
-
-    bool applied = false;
-    if (best_index >= 0) {
-        const char* best_replacement = completions_get_replacement(env->completions, best_index);
-        size_t replacement_len =
-            (best_replacement == NULL ? 0 : (size_t)ic_strlen(best_replacement));
-        size_t threshold = edit_spell_threshold((size_t)original_len, replacement_len);
-        if (best_distance <= threshold) {
-            applied = edit_complete(env, eb, best_index);
-        }
-    }
+    const ssize_t best_index = edit_best_spell_candidate(env, original_word, candidate_count, NULL);
+    const bool applied = best_index >= 0 && edit_complete(env, eb, best_index);
 
     if (!applied) {
         editor_undo_restore(eb, false);
@@ -1151,20 +1214,25 @@ static bool edit_try_spell_correct(ic_env_t* env, editor_t* eb) {
 }
 
 static bool edit_try_spell_correct_on_enter(ic_env_t* env, editor_t* eb) {
-    if (env == NULL || eb == NULL)
+    if (env == NULL || eb == NULL) {
         return false;
-    if (!env->spell_correct || !env->spell_correct_on_enter)
+    }
+    if (!env->spell_correct || !env->spell_correct_on_enter) {
         return false;
+    }
 
     const char* input = sbuf_string(eb->input);
-    if (input == NULL || eb->pos <= 0)
+    if (input == NULL || eb->pos <= 0) {
         return false;
+    }
 
     ssize_t prev = str_prev_ofs(input, eb->pos, NULL);
-    if (prev <= 0)
+    if (prev <= 0) {
         return false;
-    if (ic_char_is_separator(input + eb->pos - prev, (long)prev))
+    }
+    if (ic_char_is_separator(input + eb->pos - prev, (long)prev)) {
         return false;
+    }
 
     ssize_t count =
         completions_generate(env, env->completions, input, eb->pos, IC_MAX_COMPLETIONS_TO_TRY);
@@ -1178,8 +1246,9 @@ static bool edit_try_spell_correct_on_enter(ic_env_t* env, editor_t* eb) {
 
 // Helper function to extract the last line from a multi-line prompt
 static char* extract_last_prompt_line(alloc_t* mem, const char* prompt_text) {
-    if (prompt_text == NULL)
+    if (prompt_text == NULL) {
         return mem_strdup(mem, "");
+    }
 
     // Find the last newline in the prompt
     const char* last_newline = strrchr(prompt_text, '\n');
@@ -1194,16 +1263,18 @@ static char* extract_last_prompt_line(alloc_t* mem, const char* prompt_text) {
 
 // Helper function to print all but the last line of a multi-line prompt
 static ssize_t print_prompt_prefix_lines(ic_env_t* env, editor_t* eb, const char* prompt_text) {
-    if (env == NULL || eb == NULL)
+    if (env == NULL || eb == NULL) {
         return 0;
+    }
 
     if (eb->prompt_prefix_text != NULL) {
         mem_free(env->mem, eb->prompt_prefix_text);
         eb->prompt_prefix_text = NULL;
     }
 
-    if (prompt_text == NULL)
+    if (prompt_text == NULL) {
         return 0;
+    }
 
     const char* last_newline = strrchr(prompt_text, '\n');
     if (last_newline == NULL) {
@@ -1212,12 +1283,14 @@ static ssize_t print_prompt_prefix_lines(ic_env_t* env, editor_t* eb, const char
     }
 
     ssize_t prefix_length = to_ssize_t(last_newline - prompt_text + 1);  // +1 to include newline
-    if (prefix_length <= 0)
+    if (prefix_length <= 0) {
         return 0;
+    }
 
     char* prefix = mem_strndup(env->mem, prompt_text, prefix_length);
-    if (prefix == NULL)
+    if (prefix == NULL) {
         return 0;
+    }
 
     eb->prompt_prefix_text = prefix;
 
@@ -1238,10 +1311,12 @@ static ssize_t print_prompt_prefix_lines(ic_env_t* env, editor_t* eb, const char
 }
 
 static void redraw_prompt_prefix_lines(ic_env_t* env, editor_t* eb) {
-    if (env == NULL || eb == NULL)
+    if (env == NULL || eb == NULL) {
         return;
-    if (eb->prompt_prefix_text == NULL || eb->prompt_prefix_lines <= 0)
+    }
+    if (eb->prompt_prefix_text == NULL || eb->prompt_prefix_lines <= 0) {
         return;
+    }
     term_start_of_line(env->term);
     ic_term_mark_prompt_start(env, false);
     bbcode_print(env->bbcode, eb->prompt_prefix_text);
@@ -1250,30 +1325,32 @@ static void redraw_prompt_prefix_lines(ic_env_t* env, editor_t* eb) {
 
 static void format_line_number_prompt(char* buffer, size_t buffer_size, ssize_t row,
                                       ssize_t cursor_row, bool relative) {
-    if (buffer == NULL || buffer_size == 0)
+    if (buffer == NULL || buffer_size == 0) {
         return;
+    }
     if (relative) {
         if (cursor_row < 0) {
-            snprintf(buffer, buffer_size, "%zd| ", row + 1);
+            (void)snprintf(buffer, buffer_size, "%zd| ", row + 1);
             return;
         }
         ssize_t diff = (row >= cursor_row ? row - cursor_row : cursor_row - row);
         if (diff == 0) {
             // current line number
-            snprintf(buffer, buffer_size, "%zd| ", row + 1);
+            (void)snprintf(buffer, buffer_size, "%zd| ", row + 1);
         } else {
-            snprintf(buffer, buffer_size, "%zd| ", diff);
+            (void)snprintf(buffer, buffer_size, "%zd| ", diff);
         }
     } else {
-        snprintf(buffer, buffer_size, "%zd| ", row + 1);
+        (void)snprintf(buffer, buffer_size, "%zd| ", row + 1);
     }
 }
 
 static void edit_write_prompt(ic_env_t* env, editor_t* eb, ssize_t row, bool in_extra,
                               ssize_t cursor_row, ssize_t logical_line, ssize_t cursor_logical_line,
                               bool is_continuation_row) {
-    if (in_extra)
+    if (in_extra) {
         return;
+    }
     ic_term_mark_prompt_start(env, row > 0 || is_continuation_row);
     const bool line_numbers_active = line_numbers_enabled(env);
     const bool row_uses_prompt_text = (row == 0 && !eb->replace_prompt_line_with_number);
@@ -1340,8 +1417,9 @@ static void edit_write_prompt(ic_env_t* env, editor_t* eb, ssize_t row, bool in_
 
 static ssize_t edit_decode_codepoint(const char* text, ssize_t len, ssize_t offset,
                                      unicode_t* code_out) {
-    if (text == NULL || len <= 0 || offset >= len)
+    if (text == NULL || len <= 0 || offset >= len) {
         return 0;
+    }
     ssize_t char_len = 0;
     unicode_t code = unicode_from_qutf8((const uint8_t*)text + offset, len - offset, &char_len);
     if (char_len <= 0 || offset + char_len > len) {
@@ -1391,8 +1469,9 @@ static void edit_write_row_text(ic_env_t* env, const char* text, ssize_t len, co
         while (offset < len) {
             unicode_t code = 0;
             ssize_t char_len = edit_decode_codepoint(text, len, offset, &code);
-            if (char_len <= 0)
+            if (char_len <= 0) {
                 break;
+            }
 
             if (code == ' ') {
                 if (has_whitespace_style && !whitespace_active) {
@@ -1424,8 +1503,9 @@ static void edit_write_row_text(ic_env_t* env, const char* text, ssize_t len, co
     while (offset < len) {
         unicode_t code = 0;
         ssize_t char_len = edit_decode_codepoint(text, len, offset, &code);
-        if (char_len <= 0)
+        if (char_len <= 0) {
             break;
+        }
 
         attr_t attr = attrs[offset];
         attr_t base_attr = attr_update_with(default_attr, attr);
@@ -1438,13 +1518,13 @@ static void edit_write_row_text(ic_env_t* env, const char* text, ssize_t len, co
         bool is_hint = attr_is_eq(attr, hint_attr);
 
         if (code == ' ' && !is_hint) {
-            if (has_whitespace_style) {
-                if (!whitespace_active || !attr_is_eq(whitespace_base_attr, base_attr)) {
-                    term_set_attr(env->term, attr_update_with(base_attr, whitespace_attr));
-                    whitespace_active = true;
-                    whitespace_base_attr = base_attr;
-                }
+            if (has_whitespace_style &&
+                (!whitespace_active || !attr_is_eq(whitespace_base_attr, base_attr))) {
+                term_set_attr(env->term, attr_update_with(base_attr, whitespace_attr));
+                whitespace_active = true;
+                whitespace_base_attr = base_attr;
             }
+
             term_write_n(env->term, marker, marker_len);
         } else {
             if (has_whitespace_style && whitespace_active) {
@@ -1467,12 +1547,14 @@ static stringbuf_t* edit_ensure_extra_buffer(editor_t* eb, stringbuf_t* extra) {
 
 static stringbuf_t* edit_append_extra_block(ic_env_t* env, editor_t* eb, stringbuf_t* extra,
                                             stringbuf_t* block) {
-    if (env == NULL || eb == NULL || block == NULL || sbuf_len(block) <= 0)
+    if (env == NULL || eb == NULL || block == NULL || sbuf_len(block) <= 0) {
         return extra;
+    }
 
     extra = edit_ensure_extra_buffer(eb, extra);
-    if (extra == NULL)
+    if (extra == NULL) {
         return NULL;
+    }
 
     if (sbuf_len(extra) > 0 && !sbuf_ends_with_newline(extra)) {
         bbcode_append(env->bbcode, "\n", extra, eb->attrs_extra);
@@ -1559,13 +1641,13 @@ static void edit_render_inline_right_prompt(refresh_info_t* info, ssize_t row, s
 static bool edit_refresh_rows_iter(const char* s, ssize_t row, ssize_t row_start, ssize_t row_len,
                                    ssize_t startw, bool is_wrap, const void* arg, void* res) {
     ic_unused(res);
-    ic_unused(startw);
-    refresh_info_t* info = (refresh_info_t*)(arg);
+    refresh_info_t* info = (refresh_info_t*)arg;
     term_t* term = info->env->term;
 
     // debug_msg("edit: line refresh: row %zd, len: %zd\n", row, row_len);
-    if (row > info->last_row)
+    if (row > info->last_row) {
         return true;  // should not occur
+    }
 
     const bool should_render = (row >= info->first_row);
     const bool row_is_continuation = (!info->in_extra ? info->continuation_row : false);
@@ -1593,32 +1675,39 @@ static bool edit_refresh_rows_iter(const char* s, ssize_t row, ssize_t row_start
         if (info->env->inline_right_prompt_follows_cursor && info->cursor_row >= 0) {
             inline_right_row = info->cursor_row;
         }
+        const bool has_following_row = (row < info->last_row || info->has_following_row);
+        const bool show_wrap_marker =
+            (has_following_row && is_wrap && info->env->line_wrap_marker_width > 0 &&
+             (tty_is_utf8(info->env->tty) || (uint8_t)info->env->line_wrap_marker[0] < 0x80));
+        // A terminal with delayed wrapping keeps its cursor on the last cell of a full
+        // row. Erasing from there would erase the last input character or wrap marker.
+        const bool row_fills_terminal =
+            (startw + str_column_width_n(s + row_start, row_len) +
+                 (show_wrap_marker ? info->env->line_wrap_marker_width : 0) >=
+             info->eb->termw);
         const bool should_attempt_inline_right =
-            (!info->in_extra && info->eb->inline_right_text != NULL && row == inline_right_row);
+            (!info->in_extra && info->eb->inline_right_text != NULL && row == inline_right_row &&
+             !row_fills_terminal);
 
         if (should_attempt_inline_right) {
             edit_render_inline_right_prompt(info, row, row_len);
         }
 
         // write line ending
-        if (row < info->last_row || info->has_following_row) {
-            if (is_wrap && tty_is_utf8(info->env->tty)) {
+        if (has_following_row) {
+            if (show_wrap_marker) {
                 ic_term_mark_prompt_start(info->env, true);
-#ifndef __APPLE__
-                bbcode_print(info->env->bbcode,
-                             "[ic-diminish]\xE2\x86\x90[/]");  // left arrow
-#else
-                bbcode_print(info->env->bbcode,
-                             "[ic-diminish]\xE2\x86\xB5[/]");  // return symbol
-#endif
+                bbcode_style_open(info->env->bbcode, "ic-diminish");
+                term_write(term, info->env->line_wrap_marker);
+                bbcode_style_close(info->env->bbcode, NULL);
                 ic_term_mark_input_start(info->env);
             }
-            if (!should_attempt_inline_right) {
+            if (!should_attempt_inline_right && !row_fills_terminal) {
                 term_clear_to_end_of_line(term);
             }
             term_writeln(term, "");
         } else {
-            if (!should_attempt_inline_right) {
+            if (!should_attempt_inline_right && !row_fills_terminal) {
                 term_clear_to_end_of_line(term);
             }
         }
@@ -1640,8 +1729,9 @@ static void edit_refresh_rows(ic_env_t* env, editor_t* eb, stringbuf_t* input, a
                               ssize_t promptw, ssize_t cpromptw, bool in_extra, ssize_t first_row,
                               ssize_t last_row, bool has_following_row, ssize_t cursor_row,
                               ssize_t cursor_logical_line) {
-    if (input == NULL)
+    if (input == NULL) {
         return;
+    }
     refresh_info_t info;
     info.env = env;
     info.eb = eb;
@@ -1654,26 +1744,30 @@ static void edit_refresh_rows(ic_env_t* env, editor_t* eb, stringbuf_t* input, a
     info.cursor_logical_line = cursor_logical_line;
     info.continuation_row = false;
     info.has_following_row = has_following_row;
-    (void)sbuf_for_each_row(input, eb->termw, promptw, cpromptw, &edit_refresh_rows_iter, &info,
-                            NULL);
+    (void)sbuf_for_each_row(input, eb->termw, promptw, cpromptw, env->line_wrap_marker_width,
+                            &edit_refresh_rows_iter, &info, NULL);
 }
 
 static bool sbuf_ends_with_newline(stringbuf_t* sbuf) {
     ssize_t len = sbuf_len(sbuf);
-    if (len <= 0)
+    if (len <= 0) {
         return false;
+    }
     return (sbuf_char_at(sbuf, len - 1) == '\n');
 }
 
 static ssize_t count_logical_lines(stringbuf_t* sbuf) {
-    if (sbuf == NULL)
+    if (sbuf == NULL) {
         return 1;
+    }
     ssize_t len = sbuf_len(sbuf);
-    if (len <= 0)
+    if (len <= 0) {
         return 1;
+    }
     const char* data = sbuf_string(sbuf);
-    if (data == NULL)
+    if (data == NULL) {
         return 1;
+    }
     ssize_t lines = 1;
     for (ssize_t i = 0; i < len; ++i) {
         if (data[i] == '\n') {
@@ -1684,18 +1778,23 @@ static ssize_t count_logical_lines(stringbuf_t* sbuf) {
 }
 
 static ssize_t logical_line_at_pos(stringbuf_t* sbuf, ssize_t pos) {
-    if (sbuf == NULL)
+    if (sbuf == NULL) {
         return 0;
+    }
     ssize_t len = sbuf_len(sbuf);
-    if (len <= 0)
+    if (len <= 0) {
         return 0;
-    if (pos < 0)
+    }
+    if (pos < 0) {
         pos = 0;
-    if (pos > len)
+    }
+    if (pos > len) {
         pos = len;
+    }
     const char* data = sbuf_string(sbuf);
-    if (data == NULL)
+    if (data == NULL) {
         return 0;
+    }
     ssize_t line = 0;
     for (ssize_t i = 0; i < pos; ++i) {
         if (data[i] == '\n') {
@@ -1788,11 +1887,13 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
 
     while (true) {
         rc = (rowcol_t){0};
-        rows_input = sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw, eb->pos, &rc);
+        rows_input = sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw,
+                                        env->line_wrap_marker_width, eb->pos, &rc);
 
         if (extra != NULL) {
             rc_extra = (rowcol_t){0};
-            rows_extra = sbuf_get_rc_at_pos(extra, eb->termw, 0, 0, 0 /*pos*/, &rc_extra);
+            rows_extra = sbuf_get_rc_at_pos(extra, eb->termw, 0, 0, env->line_wrap_marker_width,
+                                            0 /*pos*/, &rc_extra);
         } else {
             rows_extra = 0;
         }
@@ -1866,8 +1967,6 @@ static void edit_refresh(ic_env_t* env, editor_t* eb) {
     const ssize_t previous_visible_cursor_row = edit_view_cursor_row(eb);
     term_start_of_line(env->term);
     term_up(env->term, previous_visible_cursor_row);
-    // term_clear_lines_to_end(env->term);  // gives flicker in old Windows cmd
-    // prompt
 
     // Render the input viewport and then any helper/menu rows. These regions are intentionally
     // non-contiguous in the logical layout when input rows above or below the cursor are hidden.
@@ -2049,8 +2148,9 @@ static bool edit_resize(ic_env_t* env, editor_t* eb) {
     const ssize_t newtermh = term_get_height(env->term);
     const bool width_changed = (eb->termw != newtermw);
     const bool height_changed = (eb->termh != newtermh);
-    if (!width_changed && !height_changed)
+    if (!width_changed && !height_changed) {
         return false;
+    }
 
     eb->termh = newtermh;
     if (!width_changed) {
@@ -2101,12 +2201,13 @@ static bool edit_resize(ic_env_t* env, editor_t* eb) {
     }
     rowcol_t rc = {0};
     const ssize_t rows_input =
-        sbuf_get_wrapped_rc_at_pos(eb->input, eb->termw, newtermw, promptw, cpromptw, eb->pos, &rc);
+        sbuf_get_wrapped_rc_at_pos(eb->input, eb->termw, newtermw, promptw, cpromptw,
+                                   env->line_wrap_marker_width, eb->pos, &rc);
     rowcol_t rc_extra = {0};
     ssize_t rows_extra = 0;
     if (extra != NULL) {
-        rows_extra =
-            sbuf_get_wrapped_rc_at_pos(extra, eb->termw, newtermw, 0, 0, 0 /*pos*/, &rc_extra);
+        rows_extra = sbuf_get_wrapped_rc_at_pos(extra, eb->termw, newtermw, 0, 0,
+                                                env->line_wrap_marker_width, 0 /*pos*/, &rc_extra);
     }
     ssize_t rows = rows_input + rows_extra;
     debug_msg(
@@ -2167,7 +2268,8 @@ static void edit_refresh_hint(ic_env_t* env, editor_t* eb) {
     }
 
     // and see if we can construct a hint (displayed after a delay)
-    ssize_t count = completions_generate(env, env->completions, sbuf_string(eb->input), eb->pos, 2);
+    ssize_t count =
+        completions_generate_hint(env, env->completions, sbuf_string(eb->input), eb->pos, 2);
     bool has_spell_completion =
         (count >= 1 && edit_completion_is_current_word_spell(env, eb, 0, NULL, NULL));
     if (count >= 1) {
@@ -2185,11 +2287,12 @@ static void edit_refresh_hint(ic_env_t* env, editor_t* eb) {
                     const char* extra_hint = hint;
                     do {
                         ssize_t newpos = sbuf_insert_at(sb, extra_hint, pos);
-                        if (newpos <= pos)
+                        if (newpos <= pos) {
                             break;
+                        }
                         pos = newpos;
-                        count =
-                            completions_generate(env, env->completions, sbuf_string(sb), pos, 2);
+                        count = completions_generate_hint(env, env->completions, sbuf_string(sb),
+                                                          pos, 2);
                         if (count == 1) {
                             const char* extra_help = NULL;
                             extra_hint = completions_get_hint(env->completions, 0, &extra_help);
@@ -2228,8 +2331,9 @@ static void edit_redo_restore(ic_env_t* env, editor_t* eb) {
 static void edit_cursor_left(ic_env_t* env, editor_t* eb) {
     ssize_t cwidth = 1;
     ssize_t prev = sbuf_prev(eb->input, eb->pos, &cwidth);
-    if (prev < 0)
+    if (prev < 0) {
         return;
+    }
     rowcol_t rc;
     (void)edit_get_rowcol(env, eb, &rc);
     eb->pos = prev;
@@ -2239,8 +2343,9 @@ static void edit_cursor_left(ic_env_t* env, editor_t* eb) {
 static void edit_cursor_right(ic_env_t* env, editor_t* eb) {
     ssize_t cwidth = 1;
     ssize_t next = sbuf_next(eb->input, eb->pos, &cwidth);
-    if (next < 0)
+    if (next < 0) {
         return;
+    }
     rowcol_t rc;
     (void)edit_get_rowcol(env, eb, &rc);
     eb->pos = next;
@@ -2249,8 +2354,9 @@ static void edit_cursor_right(ic_env_t* env, editor_t* eb) {
 
 static void edit_cursor_line_end(ic_env_t* env, editor_t* eb) {
     ssize_t end = sbuf_find_line_end(eb->input, eb->pos);
-    if (end < 0)
+    if (end < 0) {
         return;
+    }
     eb->pos = end;
     edit_refresh_hint(env, eb);
 }
@@ -2265,40 +2371,45 @@ static void edit_cursor_ctrl_a(ic_env_t* env, editor_t* eb) {
 
 static void edit_cursor_line_start(ic_env_t* env, editor_t* eb) {
     ssize_t start = sbuf_find_line_start(eb->input, eb->pos);
-    if (start < 0)
+    if (start < 0) {
         return;
+    }
     eb->pos = start;
     edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_next_word(ic_env_t* env, editor_t* eb) {
     ssize_t end = sbuf_find_word_end(eb->input, eb->pos);
-    if (end < 0)
+    if (end < 0) {
         return;
+    }
     eb->pos = end;
     edit_refresh_hint(env, eb);
 }
 
 static void edit_cursor_prev_word(ic_env_t* env, editor_t* eb) {
     ssize_t start = sbuf_find_word_start(eb->input, eb->pos);
-    if (start < 0)
+    if (start < 0) {
         return;
+    }
     eb->pos = start;
     edit_refresh_hint(env, eb);
 }
 
 static ic_maybe_unused void edit_cursor_next_ws_word(ic_env_t* env, editor_t* eb) {
     ssize_t end = sbuf_find_ws_word_end(eb->input, eb->pos);
-    if (end < 0)
+    if (end < 0) {
         return;
+    }
     eb->pos = end;
     edit_refresh_hint(env, eb);
 }
 
 static ic_maybe_unused void edit_cursor_prev_ws_word(ic_env_t* env, editor_t* eb) {
     ssize_t start = sbuf_find_ws_word_start(eb->input, eb->pos);
-    if (start < 0)
+    if (start < 0) {
         return;
+    }
     eb->pos = start;
     edit_refresh_hint(env, eb);
 }
@@ -2316,21 +2427,15 @@ static void edit_cursor_to_end(ic_env_t* env, editor_t* eb) {
 static void edit_cursor_row_up(ic_env_t* env, editor_t* eb) {
     rowcol_t rc;
     (void)edit_get_rowcol(env, eb, &rc);
-    if (rc.row == 0) {
+    // Recalled entries end here so repeated Up presses can skip multiline content.
+    if (editor_pos_is_at_end(eb) || rc.row == 0) {
         edit_history_prev(env, eb);
     } else {
         edit_set_pos_at_rowcol(env, eb, rc.row - 1, rc.col);
     }
 }
 
-static void edit_cursor_row_up_with_history_spell(ic_env_t* env, editor_t* eb) {
-    rowcol_t rc;
-    (void)edit_get_rowcol(env, eb, &rc);
-    if (rc.row != 0) {
-        edit_set_pos_at_rowcol(env, eb, rc.row - 1, rc.col);
-        return;
-    }
-
+static void edit_history_prev_with_spell(ic_env_t* env, editor_t* eb) {
     ssize_t previous_history_idx = eb->history_idx;
     char* previous_input = mem_strdup(env->mem, sbuf_string(eb->input));
     edit_history_prev(env, eb);
@@ -2388,48 +2493,9 @@ static void edit_cursor_row_up_with_history_spell(ic_env_t* env, editor_t* eb) {
         return;
     }
 
-    ssize_t best_spell_idx = -1;
-    ssize_t spell_count = 0;
-    size_t best_distance = SIZE_MAX;
-    long best_length_diff = LONG_MAX;
-    ssize_t original_len = ic_strlen(original_word);
-    for (ssize_t i = 0; i < count; ++i) {
-        const char* source = completions_get_source(env->completions, i);
-        if (source == NULL || strcmp(source, "spell") != 0)
-            continue;
-        spell_count++;
-
-        const char* replacement = completions_get_replacement(env->completions, i);
-        if (replacement == NULL || *replacement == '\0')
-            continue;
-        size_t distance = levenshtein_casefold(env->mem, original_word, replacement);
-        if (distance == SIZE_MAX)
-            continue;
-        ssize_t replacement_len = ic_strlen(replacement);
-        long len_diff = labs((long)replacement_len - (long)original_len);
-        if (distance < best_distance ||
-            (distance == best_distance && len_diff < best_length_diff)) {
-            best_distance = distance;
-            best_length_diff = len_diff;
-            best_spell_idx = i;
-        }
-    }
-
-    if (spell_count <= 0) {
-        completions_clear(env->completions);
-        mem_free(env->mem, original_word);
-        return;
-    }
-
+    const ssize_t best_spell_idx = edit_best_spell_candidate(env, original_word, count, "spell");
     if (best_spell_idx >= 0) {
-        const char* best_replacement =
-            completions_get_replacement(env->completions, best_spell_idx);
-        size_t replacement_len =
-            (best_replacement == NULL ? 0 : (size_t)ic_strlen(best_replacement));
-        size_t threshold = edit_spell_threshold((size_t)original_len, replacement_len);
-        if (best_distance <= threshold) {
-            (void)edit_complete(env, eb, best_spell_idx);
-        }
+        (void)edit_complete(env, eb, best_spell_idx);
     }
 
     mem_free(env->mem, original_word);
@@ -2439,7 +2505,7 @@ static void edit_cursor_row_up_with_history_spell(ic_env_t* env, editor_t* eb) {
 static void edit_cursor_row_down(ic_env_t* env, editor_t* eb) {
     rowcol_t rc;
     ssize_t rows = edit_get_rowcol(env, eb, &rc);
-    if (rc.row + 1 >= rows) {
+    if (editor_pos_is_at_end(eb) || rc.row + 1 >= rows) {
         edit_history_next(env, eb);
     } else {
         edit_set_pos_at_rowcol(env, eb, rc.row + 1, rc.col);
@@ -2449,31 +2515,35 @@ static void edit_cursor_row_down(ic_env_t* env, editor_t* eb) {
 static void edit_cursor_match_brace(ic_env_t* env, editor_t* eb) {
     ssize_t match =
         find_matching_brace(sbuf_string(eb->input), eb->pos, ic_env_get_match_braces(env), NULL);
-    if (match < 0)
+    if (match < 0) {
         return;
+    }
     eb->pos = match;
     edit_refresh_hint(env, eb);
 }
 
 static void edit_backspace(ic_env_t* env, editor_t* eb) {
-    if (eb->pos <= 0)
+    if (eb->pos <= 0) {
         return;
+    }
     editor_start_modify(eb);
     eb->pos = sbuf_delete_char_before(eb->input, eb->pos);
     edit_refresh_hint(env, eb);
 }
 
 static void edit_delete_char(ic_env_t* env, editor_t* eb) {
-    if (eb->pos >= sbuf_len(eb->input))
+    if (eb->pos >= sbuf_len(eb->input)) {
         return;
+    }
     editor_start_modify(eb);
     sbuf_delete_char_at(eb->input, eb->pos);
     edit_refresh_hint(env, eb);
 }
 
 static void edit_delete_all(ic_env_t* env, editor_t* eb) {
-    if (sbuf_len(eb->input) <= 0)
+    if (sbuf_len(eb->input) <= 0) {
         return;
+    }
     editor_start_modify(eb);
     sbuf_clear(eb->input);
     eb->pos = 0;
@@ -2481,14 +2551,17 @@ static void edit_delete_all(ic_env_t* env, editor_t* eb) {
 }
 
 static bool edit_get_line_bounds(editor_t* eb, ssize_t* start, ssize_t* end) {
-    if (eb == NULL || start == NULL || end == NULL)
+    if (eb == NULL || start == NULL || end == NULL) {
         return false;
+    }
     *start = sbuf_find_line_start(eb->input, eb->pos);
-    if (*start < 0)
+    if (*start < 0) {
         return false;
+    }
     *end = sbuf_find_line_end(eb->input, eb->pos);
-    if (*end < 0)
+    if (*end < 0) {
         return false;
+    }
     return true;
 }
 
@@ -2496,11 +2569,13 @@ typedef ssize_t (*edit_boundary_finder_t)(stringbuf_t*, ssize_t);
 
 static void edit_delete_to_boundary(ic_env_t* env, editor_t* eb, edit_boundary_finder_t finder,
                                     bool delete_to_start) {
-    if (finder == NULL)
+    if (finder == NULL) {
         return;
+    }
     ssize_t boundary = finder(eb->input, eb->pos);
-    if (boundary < 0)
+    if (boundary < 0) {
         return;
+    }
     editor_start_modify(eb);
     if (delete_to_start) {
         sbuf_delete_from_to(eb->input, boundary, eb->pos);
@@ -2514,8 +2589,9 @@ static void edit_delete_to_boundary(ic_env_t* env, editor_t* eb, edit_boundary_f
 static void edit_delete_to_end_of_line(ic_env_t* env, editor_t* eb) {
     ssize_t start = 0;
     ssize_t end = 0;
-    if (!edit_get_line_bounds(eb, &start, &end))
+    if (!edit_get_line_bounds(eb, &start, &end)) {
         return;
+    }
     editor_start_modify(eb);
     // if on an empty line, remove it completely
     if (start == end && sbuf_char_at(eb->input, end) == '\n') {
@@ -2530,8 +2606,9 @@ static void edit_delete_to_end_of_line(ic_env_t* env, editor_t* eb) {
 static void edit_delete_to_start_of_line(ic_env_t* env, editor_t* eb) {
     ssize_t start = 0;
     ssize_t end = 0;
-    if (!edit_get_line_bounds(eb, &start, &end))
+    if (!edit_get_line_bounds(eb, &start, &end)) {
         return;
+    }
     editor_start_modify(eb);
     // delete start newline if it was an empty line
     bool goright = false;
@@ -2544,16 +2621,18 @@ static void edit_delete_to_start_of_line(ic_env_t* env, editor_t* eb) {
     }
     sbuf_delete_from_to(eb->input, start, eb->pos);
     eb->pos = start;
-    if (goright)
+    if (goright) {
         edit_cursor_right(env, eb);
+    }
     edit_refresh(env, eb);
 }
 
 static ic_maybe_unused void edit_delete_line(ic_env_t* env, editor_t* eb) {
     ssize_t start = 0;
     ssize_t end = 0;
-    if (!edit_get_line_bounds(eb, &start, &end))
+    if (!edit_get_line_bounds(eb, &start, &end)) {
         return;
+    }
     editor_start_modify(eb);
     // delete newline as well so no empty line is left;
     bool goright = false;
@@ -2567,8 +2646,9 @@ static ic_maybe_unused void edit_delete_line(ic_env_t* env, editor_t* eb) {
     }
     sbuf_delete_from_to(eb->input, start, end);
     eb->pos = start;
-    if (goright)
+    if (goright) {
         edit_cursor_right(env, eb);
+    }
     edit_refresh(env, eb);
 }
 
@@ -2590,11 +2670,13 @@ static ic_maybe_unused void edit_delete_to_end_of_ws_word(ic_env_t* env, editor_
 
 static ic_maybe_unused void edit_delete_word(ic_env_t* env, editor_t* eb) {
     ssize_t start = sbuf_find_word_start(eb->input, eb->pos);
-    if (start < 0)
+    if (start < 0) {
         return;
+    }
     ssize_t end = sbuf_find_word_end(eb->input, eb->pos);
-    if (end < 0)
+    if (end < 0) {
         return;
+    }
     editor_start_modify(eb);
     sbuf_delete_from_to(eb->input, start, end);
     eb->pos = start;
@@ -2602,23 +2684,27 @@ static ic_maybe_unused void edit_delete_word(ic_env_t* env, editor_t* eb) {
 }
 
 static void edit_swap_char(ic_env_t* env, editor_t* eb) {
-    if (eb->pos <= 0 || eb->pos == sbuf_len(eb->input))
+    if (eb->pos <= 0 || eb->pos == sbuf_len(eb->input)) {
         return;
+    }
     editor_start_modify(eb);
     eb->pos = sbuf_swap_char(eb->input, eb->pos);
     edit_refresh(env, eb);
 }
 
 static void edit_multiline_eol(ic_env_t* env, editor_t* eb) {
-    if (eb->pos <= 0)
+    if (eb->pos <= 0) {
         return;
-    if (sbuf_string(eb->input)[eb->pos - 1] != env->multiline_eol)
+    }
+    if (sbuf_string(eb->input)[eb->pos - 1] != env->multiline_eol) {
         return;
+    }
     editor_start_modify(eb);
     if (env->retain_multiline_continuation) {
         ssize_t nextpos = sbuf_insert_at(eb->input, "\n", eb->pos);
-        if (nextpos >= 0)
+        if (nextpos >= 0) {
             eb->pos = nextpos;
+        }
         edit_refresh(env, eb);
         return;
     }
@@ -2631,8 +2717,9 @@ static void edit_multiline_eol(ic_env_t* env, editor_t* eb) {
 static void edit_insert_unicode(ic_env_t* env, editor_t* eb, unicode_t u) {
     editor_start_modify(eb);
     ssize_t nextpos = sbuf_insert_unicode_at(eb->input, u, eb->pos);
-    if (nextpos >= 0)
+    if (nextpos >= 0) {
         eb->pos = nextpos;
+    }
     edit_refresh_hint(env, eb);
 }
 
@@ -2641,16 +2728,17 @@ static void edit_insert_unicode(ic_env_t* env, editor_t* eb, unicode_t u) {
 // without needing to understand the caller's full grammar.
 static bool edit_line_opens_indented_block(const char* input, ssize_t line_start,
                                            ssize_t line_end) {
-    while (line_end > line_start &&
-           (input[line_end - 1] == ' ' || input[line_end - 1] == '\t')) {
+    while (line_end > line_start && (input[line_end - 1] == ' ' || input[line_end - 1] == '\t')) {
         --line_end;
     }
-    if (line_end <= line_start)
+    if (line_end <= line_start) {
         return false;
+    }
 
     const char last = input[line_end - 1];
-    if (last == '{' || last == '(' || last == '[')
+    if (last == '{' || last == '(' || last == '[') {
         return true;
+    }
 
     ssize_t word_start = line_end;
     while (word_start > line_start && isalpha((unsigned char)input[word_start - 1])) {
@@ -2682,22 +2770,25 @@ static void edit_insert_auto_indented_linefeed(ic_env_t* env, editor_t* eb) {
 
     editor_start_modify(eb);
     ssize_t nextpos = sbuf_insert_char_at(eb->input, '\n', eb->pos);
-    if (nextpos < 0)
+    if (nextpos < 0) {
         return;
+    }
     eb->pos = nextpos;
 
     if (!env->no_multiline_indent) {
         for (ssize_t i = 0; i < inherited_indent; ++i) {
             const char whitespace = sbuf_char_at(eb->input, line_start + i);
             nextpos = sbuf_insert_char_at(eb->input, whitespace, eb->pos);
-            if (nextpos < 0)
+            if (nextpos < 0) {
                 break;
+            }
             eb->pos = nextpos;
         }
         if (add_indent_level) {
             nextpos = sbuf_insert_at(eb->input, "  ", eb->pos);
-            if (nextpos >= 0)
+            if (nextpos >= 0) {
                 eb->pos = nextpos;
+            }
         }
     }
     edit_refresh(env, eb);
@@ -2708,20 +2799,23 @@ static bool edit_is_word_char(char ch) {
 }
 
 static bool edit_is_escaped_at(stringbuf_t* input, ssize_t index) {
-    if (input == NULL || index <= 0)
+    if (input == NULL || index <= 0) {
         return false;
+    }
     ssize_t backslash_count = 0;
     for (ssize_t i = index - 1; i >= 0; --i) {
-        if (sbuf_char_at(input, i) != '\\')
+        if (sbuf_char_at(input, i) != '\\') {
             break;
+        }
         backslash_count++;
     }
     return (backslash_count % 2) == 1;
 }
 
 static void edit_auto_brace(ic_env_t* env, editor_t* eb, char c) {
-    if (env->no_autobrace)
+    if (env->no_autobrace) {
         return;
+    }
     const char* braces = ic_env_get_auto_braces(env);
     for (const char* b = braces; *b != 0; b += 2) {
         const char open = b[0];
@@ -2737,10 +2831,13 @@ static void edit_auto_brace(ic_env_t* env, editor_t* eb, char c) {
                     sbuf_delete_char_at(eb->input, eb->pos);
                     return;
                 }
-                if (escaped)
+                if (escaped) {
                     return;
-                if (open == '\'' && edit_is_word_char(sbuf_char_at(eb->input, inserted_index - 1)))
+                }
+                if (open == '\'' &&
+                    edit_is_word_char(sbuf_char_at(eb->input, inserted_index - 1))) {
                     return;
+                }
                 (void)sbuf_insert_char_at(eb->input, close, eb->pos);
                 return;
             }
@@ -2766,12 +2863,15 @@ static void editor_auto_indent(editor_t* eb, const char* pre, const char* post) 
     assert(eb->pos > 0 && sbuf_char_at(eb->input, eb->pos - 1) == '\n');
     ssize_t prelen = ic_strlen(pre);
     if (prelen > 0) {
-        if (eb->pos - 1 < prelen)
+        if (eb->pos - 1 < prelen) {
             return;
-        if (!ic_starts_with(sbuf_string(eb->input) + eb->pos - 1 - prelen, pre))
+        }
+        if (!ic_starts_with(sbuf_string(eb->input) + eb->pos - 1 - prelen, pre)) {
             return;
-        if (!ic_starts_with(sbuf_string(eb->input) + eb->pos, post))
+        }
+        if (!ic_starts_with(sbuf_string(eb->input) + eb->pos, post)) {
             return;
+        }
         eb->pos = sbuf_insert_at(eb->input, "  ", eb->pos);
         (void)sbuf_insert_char_at(eb->input, '\n', eb->pos);
     }
@@ -2781,8 +2881,9 @@ static bool edit_expand_abbreviation_for_range(ic_env_t* env, editor_t* eb, cons
                                                ssize_t word_start, ssize_t word_end,
                                                ssize_t cursor_delta, bool modification_started) {
     ssize_t word_len = word_end - word_start;
-    if (word_len <= 0)
+    if (word_len <= 0) {
         return false;
+    }
 
     for (ssize_t i = 0; i < env->abbreviation_count; ++i) {
         ic_abbreviation_entry_t* entry = &env->abbreviations[i];
@@ -2792,8 +2893,9 @@ static bool edit_expand_abbreviation_for_range(ic_env_t* env, editor_t* eb, cons
                 editor_start_modify(eb);
             }
             sbuf_delete_at(eb->input, word_start, word_len);
-            if (cursor_delta < 0)
+            if (cursor_delta < 0) {
                 cursor_delta = 0;
+            }
             eb->pos = word_start + cursor_delta;
             ssize_t new_pos = sbuf_insert_at(eb->input, entry->expansion, word_start);
             ssize_t expansion_len = new_pos - word_start;
@@ -2807,33 +2909,40 @@ static bool edit_expand_abbreviation_for_range(ic_env_t* env, editor_t* eb, cons
 
 static bool edit_try_expand_abbreviation(ic_env_t* env, editor_t* eb, bool boundary_char_present,
                                          bool modification_started) {
-    if (env == NULL || eb == NULL)
+    if (env == NULL || eb == NULL) {
         return false;
-    if (env->abbreviation_count <= 0 || env->abbreviations == NULL)
+    }
+    if (env->abbreviation_count <= 0 || env->abbreviations == NULL) {
         return false;
+    }
 
     const char* buffer = sbuf_string(eb->input);
-    if (buffer == NULL)
+    if (buffer == NULL) {
         return false;
+    }
 
     ssize_t boundary_offset = (boundary_char_present ? 1 : 0);
-    if (boundary_char_present && eb->pos <= boundary_offset)
+    if (boundary_char_present && eb->pos <= boundary_offset) {
         return false;
+    }
 
     if (eb->pos > boundary_offset) {
         if (boundary_char_present) {
             ssize_t boundary_index = eb->pos - 1;
-            if (boundary_index < 0)
+            if (boundary_index < 0) {
                 return false;
-            if (!ic_char_is_white(buffer + boundary_index, 1))
+            }
+            if (!ic_char_is_white(buffer + boundary_index, 1)) {
                 return false;
+            }
         }
 
         ssize_t word_end = eb->pos - boundary_offset;
         if (word_end > 0 && !ic_char_is_white(buffer + word_end - 1, 1)) {
             ssize_t word_start = sbuf_find_ws_word_start(eb->input, word_end);
-            if (word_start < 0)
+            if (word_start < 0) {
                 word_start = 0;
+            }
 
             if (word_start == 0 || ic_char_is_white(buffer + word_start - 1, 1)) {
                 ssize_t cursor_delta = eb->pos - word_end;
@@ -2851,15 +2960,13 @@ static bool edit_try_expand_abbreviation(ic_env_t* env, editor_t* eb, bool bound
 
     if (!boundary_char_present) {
         ssize_t len = sbuf_len(eb->input);
-        if (eb->pos < len && !ic_char_is_white(buffer + eb->pos, 1)) {
-            if (eb->pos == 0 || ic_char_is_white(buffer + eb->pos - 1, 1)) {
-                ssize_t word_end = sbuf_find_ws_word_end(eb->input, eb->pos);
-                if (word_end > eb->pos) {
-                    if (edit_expand_abbreviation_for_range(env, eb, buffer, eb->pos, word_end, 0,
-                                                           modification_started)) {
-                        return true;
-                    }
-                }
+        if ((eb->pos < len && !ic_char_is_white(buffer + eb->pos, 1)) &&
+            (eb->pos == 0 || ic_char_is_white(buffer + eb->pos - 1, 1))) {
+            ssize_t word_end = sbuf_find_ws_word_end(eb->input, eb->pos);
+            if ((word_end > eb->pos) &&
+                edit_expand_abbreviation_for_range(env, eb, buffer, eb->pos, word_end, 0,
+                                                   modification_started)) {
+                return true;
             }
         }
     }
@@ -2869,19 +2976,21 @@ static bool edit_try_expand_abbreviation(ic_env_t* env, editor_t* eb, bool bound
 
 static bool edit_expand_abbreviation_if_needed(ic_env_t* env, editor_t* eb,
                                                bool modification_started) {
-    if (env == NULL || eb == NULL || eb->input == NULL)
+    if (env == NULL || eb == NULL || eb->input == NULL) {
         return false;
-    if (eb->pos <= 0)
+    }
+    if (eb->pos <= 0) {
         return false;
+    }
 
     const char* buffer = sbuf_string(eb->input);
-    if (buffer == NULL)
+    if (buffer == NULL) {
         return false;
+    }
 
-    if (ic_char_is_white(buffer + eb->pos - 1, 1)) {
-        if (edit_try_expand_abbreviation(env, eb, true, modification_started)) {
-            return true;
-        }
+    if (ic_char_is_white(buffer + eb->pos - 1, 1) &&
+        edit_try_expand_abbreviation(env, eb, true, modification_started)) {
+        return true;
     }
 
     return edit_try_expand_abbreviation(env, eb, false, modification_started);
@@ -2890,8 +2999,9 @@ static bool edit_expand_abbreviation_if_needed(ic_env_t* env, editor_t* eb,
 static void edit_insert_char(ic_env_t* env, editor_t* eb, char c) {
     editor_start_modify(eb);
     ssize_t nextpos = sbuf_insert_char_at(eb->input, c, eb->pos);
-    if (nextpos >= 0)
+    if (nextpos >= 0) {
         eb->pos = nextpos;
+    }
     if (c == ' ' || c == '\n' || c == '\r') {
         (void)edit_try_expand_abbreviation(env, eb, true, true);
     }
@@ -2918,12 +3028,14 @@ enum {
 };
 
 static char* edit_escape_status_fragment(alloc_t* mem, const char* text) {
-    if (mem == NULL || text == NULL)
+    if (mem == NULL || text == NULL) {
         return NULL;
+    }
 
     const ssize_t len = ic_strlen(text);
-    if (len < 0)
+    if (len < 0) {
         return NULL;
+    }
 
     ssize_t extra = 0;
     for (ssize_t i = 0; i < len; ++i) {
@@ -2934,8 +3046,9 @@ static char* edit_escape_status_fragment(alloc_t* mem, const char* text) {
     }
 
     char* escaped = mem_malloc_tp_n(mem, char, (size_t)len + (size_t)extra + 1);
-    if (escaped == NULL)
+    if (escaped == NULL) {
         return NULL;
+    }
 
     char* dest = escaped;
     for (ssize_t i = 0; i < len; ++i) {
@@ -2959,12 +3072,14 @@ static bool edit_format_spell_status_hint(ic_env_t* env, editor_t* eb, char* buf
 
     buffer[0] = '\0';
 
-    if (eb->pos <= 0 || completions_count(env->completions) <= 0)
+    if (eb->pos <= 0 || completions_count(env->completions) <= 0) {
         return false;
+    }
 
     const char* input = sbuf_string(eb->input);
-    if (input == NULL)
+    if (input == NULL) {
         return false;
+    }
 
     const char* replacement = NULL;
     ssize_t replacement_start = 0;
@@ -2973,8 +3088,9 @@ static bool edit_format_spell_status_hint(ic_env_t* env, editor_t* eb, char* buf
     }
 
     char* original = mem_strndup(env->mem, input + replacement_start, eb->pos - replacement_start);
-    if (original == NULL)
+    if (original == NULL) {
         return false;
+    }
 
     if (strcmp(original, replacement) == 0) {
         mem_free(env->mem, original);
@@ -3046,11 +3162,10 @@ static void edit_format_mouse_enabled_status_hint(ic_env_t* env, bool include_di
         char mouse_toggle_keys[EDIT_STATUS_HINT_KEYS_LEN];
         format_binding_keys(env, IC_KEY_ACTION_TOGGLE_MOUSE_REPORTING, NULL, mouse_toggle_keys,
                             sizeof(mouse_toggle_keys), true);
-        if (mouse_toggle_keys[0] != '\0' && strcmp(mouse_toggle_keys, "(unbound)") != 0) {
-            if (snprintf(buffer, buflen, "Mouse clicking is enabled (press %s to disable)",
-                         mouse_toggle_keys) >= 0) {
-                return;
-            }
+        if (mouse_toggle_keys[0] != '\0' && strcmp(mouse_toggle_keys, "(unbound)") != 0 &&
+            snprintf(buffer, buflen, "Mouse clicking is enabled (press %s to disable)",
+                     mouse_toggle_keys) >= 0) {
+            return;
         }
     }
 
@@ -3384,17 +3499,17 @@ static bool edit_mouse_event_is_drag(editor_t* eb, const tty_mouse_event_t* even
         return false;
     }
 
-    const bool moved = (!eb->mouse_left_button_down ||
-                        event->column != eb->mouse_left_press_column ||
-                        event->row != eb->mouse_left_press_row);
+    const bool moved =
+        (!eb->mouse_left_button_down || event->column != eb->mouse_left_press_column ||
+         event->row != eb->mouse_left_press_row);
     if (event->action == TTY_MOUSE_ACTION_LEFT_DRAG) {
         return moved;
     }
 
     // Some terminals/multiplexers only report presses and releases. A release in
     // another cell still identifies a drag, though selection needs a new gesture.
-    const bool dragged = (event->action == TTY_MOUSE_ACTION_LEFT_RELEASE &&
-                          eb->mouse_left_button_down && moved);
+    const bool dragged =
+        (event->action == TTY_MOUSE_ACTION_LEFT_RELEASE && eb->mouse_left_button_down && moved);
     eb->mouse_left_button_down = false;
     return dragged;
 }
@@ -3588,15 +3703,18 @@ static void edit_disable_menu_mouse_scroll(ic_env_t* env, bool enabled) {
 //-------------------------------------------------------------
 
 static bool apply_default_multiline_start_lines(ic_env_t* env, editor_t* eb) {
-    if (env == NULL || eb == NULL || eb->input == NULL || env->singleline_only)
+    if (env == NULL || eb == NULL || eb->input == NULL || env->singleline_only) {
         return false;
+    }
 
     size_t desired = env->multiline_start_line_count;
-    if (desired <= 1)
+    if (desired <= 1) {
         return false;
+    }
 
-    if (sbuf_len(eb->input) > 0)
+    if (sbuf_len(eb->input) > 0) {
         return false;
+    }
 
     const size_t max_lines = 256;
     if (desired > max_lines) {
@@ -3605,8 +3723,9 @@ static bool apply_default_multiline_start_lines(ic_env_t* env, editor_t* eb) {
 
     bool appended = false;
     for (size_t i = 1; i < desired; ++i) {
-        if (sbuf_append_char(eb->input, '\n') < 0)
+        if (sbuf_append_char(eb->input, '\n') < 0) {
             break;
+        }
         appended = true;
     }
 
@@ -3643,14 +3762,16 @@ static bool insert_initial_input(const char* initial_input, editor_t* eb, size_t
 }
 
 static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
-    if (env == NULL || eb == NULL || eb->status == NULL)
+    if (env == NULL || eb == NULL || eb->status == NULL) {
         return false;
+    }
 
     // A bracketed paste already batches redraws. Batch status callbacks too:
     // they may parse the input or search the filesystem for every character.
     // The next loop iteration after the paste ends updates the complete input.
-    if (eb->refresh_suppressed)
+    if (eb->refresh_suppressed) {
         return false;
+    }
 
     const char* custom_message = NULL;
     if (env->status_message_callback != NULL) {
@@ -3795,23 +3916,27 @@ static bool edit_update_status_message(ic_env_t* env, editor_t* eb) {
 }
 
 static bool edit_should_submit_current_buffer(ic_env_t* env, editor_t* eb) {
-    if (env == NULL || eb == NULL)
+    if (env == NULL || eb == NULL) {
         return true;
+    }
 
     ic_check_for_continuation_or_return_fun_t* callback = env->continuation_check_callback;
-    if (callback == NULL)
+    if (callback == NULL) {
         return true;
+    }
 
     const char* buffer = sbuf_string(eb->input);
-    if (buffer == NULL)
+    if (buffer == NULL) {
         buffer = "";
+    }
 
     return callback(buffer, env->continuation_check_arg);
 }
 
 static void edit_release_editor(ic_env_t* env, editor_t* eb) {
-    if (env == NULL || eb == NULL)
+    if (env == NULL || eb == NULL) {
         return;
+    }
     editstate_done(env->mem, &eb->undo);
     editstate_done(env->mem, &eb->redo);
     attrbuf_free(eb->attrs);
@@ -3906,6 +4031,10 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
 
     term_set_track_output(env->term, false);
 
+    // Initialize unused rows with the default background before drawing a new prompt.
+    term_attr_reset(env->term);
+    term_clear_lines_to_end(env->term);
+
     if (!env->bracketed_paste_enabled && env->term != NULL && term_is_interactive(env->term)) {
         term_write(env->term, "\x1b[?2004h");
         env->bracketed_paste_enabled = true;
@@ -3973,7 +4102,7 @@ static char* edit_line(ic_env_t* env, const char* prompt_text, const char* inlin
     }
 
     // always a history entry for the current input
-    (void)history_push(env->history, "");
+    history_begin_edit(env->history);
 
     if (edit_update_status_message(env, &eb)) {
         if (eb.refresh_suppressed) {
@@ -4244,7 +4373,7 @@ edit_loop_entry:
                     break;  // ctrl+D on empty quits with CTRL+D token
                 }
                 edit_delete_char(env, &eb);  // otherwise it is like delete
-            } else if (c == KEY_CTRL_C || c == KEY_EVENT_STOP) {
+            } else if (c == KEY_CTRL_C || c == KEY_EVENT_STOP || c == KEY_EVENT_INTERRUPT) {
                 // Clear history preview when cancelling
                 edit_clear_history_preview(&eb);
                 if (c == KEY_EVENT_STOP) {
@@ -4267,7 +4396,7 @@ edit_loop_entry:
             }
 
             // Editing Operations
-            else
+            else {
                 switch (c) {
                         // events
                     case KEY_EVENT_RESIZE:
@@ -4305,6 +4434,7 @@ edit_loop_entry:
                         edit_history_prev(env, &eb);
                         break;
                     case KEY_CTRL_N:
+                    case WITH_SHIFT(KEY_DOWN):
                         edit_history_next(env, &eb);
                         break;
                     case KEY_CTRL_L:
@@ -4338,7 +4468,7 @@ edit_loop_entry:
                         edit_cursor_row_up(env, &eb);
                         break;
                     case WITH_SHIFT(KEY_UP):
-                        edit_cursor_row_up_with_history_spell(env, &eb);
+                        edit_history_prev_with_spell(env, &eb);
                         break;
                     case KEY_DOWN:
                         edit_cursor_row_down(env, &eb);
@@ -4444,11 +4574,11 @@ edit_loop_entry:
                         break;
                     }
                 }
+            }
 
             if (request_submit || eb.request_submit) {
                 bool should_submit = edit_should_submit_current_buffer(env, &eb);
                 if (!should_submit && !env->singleline_only) {
-                    request_submit = false;
                     eb.request_submit = false;
                     edit_insert_auto_indented_linefeed(env, &eb);
                     continue;
@@ -4456,7 +4586,6 @@ edit_loop_entry:
                 if (should_submit && edit_try_spell_correct_on_enter(env, &eb)) {
                     should_submit = edit_should_submit_current_buffer(env, &eb);
                     if (!should_submit && !env->singleline_only) {
-                        request_submit = false;
                         eb.request_submit = false;
                         edit_insert_auto_indented_linefeed(env, &eb);
                         continue;
@@ -4545,13 +4674,11 @@ edit_loop_entry:
         env->last_readline_disposition = IC_READLINE_DISPOSITION_SUBMIT;
     }
 
-    // update history in memory (file saving handled after execution)
-    if (!idle_timeout_received) {
-        (void)history_update(env->history, sbuf_string(eb.input));
-    }
-    if (idle_timeout_received || res == NULL || sbuf_len(eb.input) <= 1) {
-        ic_history_remove_last();
-    }
+    // Discard the private draft. Hosts can record the submitted command after
+    // execution; standalone isocline callers retain automatic history recording.
+    history_end_edit(env->history, env->last_readline_disposition == IC_READLINE_DISPOSITION_SUBMIT
+                                       ? sbuf_string(eb.input)
+                                       : NULL);
 
     edit_reset_mouse_reporting_session(env, &eb, false);
 
@@ -4568,8 +4695,9 @@ edit_loop_entry:
 
 ic_public bool ic_set_buffer(const char* buffer) {
     ic_env_t* env = ic_get_env();
-    if (env == NULL || env->current_editor == NULL)
+    if (env == NULL || env->current_editor == NULL) {
         return false;
+    }
 
     editor_t* eb = env->current_editor;
 
@@ -4595,8 +4723,9 @@ ic_public bool ic_set_buffer(const char* buffer) {
 
 ic_public const char* ic_get_buffer(void) {
     ic_env_t* env = ic_get_env();
-    if (env == NULL || env->current_editor == NULL)
+    if (env == NULL || env->current_editor == NULL) {
         return NULL;
+    }
 
     editor_t* eb = env->current_editor;
     return sbuf_string(eb->input);
@@ -4614,8 +4743,9 @@ ic_public bool ic_execute_key_action(ic_key_action_t action) {
 
 ic_public bool ic_get_cursor_pos(size_t* out_pos) {
     ic_env_t* env = ic_get_env();
-    if (env == NULL || env->current_editor == NULL || out_pos == NULL)
+    if (env == NULL || env->current_editor == NULL || out_pos == NULL) {
         return false;
+    }
 
     editor_t* eb = env->current_editor;
     *out_pos = (size_t)(eb->pos >= 0 ? eb->pos : 0);
@@ -4624,8 +4754,9 @@ ic_public bool ic_get_cursor_pos(size_t* out_pos) {
 
 ic_public bool ic_set_cursor_pos(size_t pos) {
     ic_env_t* env = ic_get_env();
-    if (env == NULL || env->current_editor == NULL)
+    if (env == NULL || env->current_editor == NULL) {
         return false;
+    }
 
     editor_t* eb = env->current_editor;
     ssize_t len = sbuf_len(eb->input);
@@ -4679,6 +4810,7 @@ ic_public bool ic_resume_readline_terminal(void) {
     }
 
     editor_t* eb = env->current_editor;
+    tty_adopt_external_modes(env->tty);
     if (!tty_start_raw(env->tty)) {
         return false;
     }
@@ -4717,8 +4849,9 @@ ic_public bool ic_resume_readline_terminal(void) {
 
 ic_public bool ic_request_submit(void) {
     ic_env_t* env = ic_get_env();
-    if (env == NULL || env->current_editor == NULL)
+    if (env == NULL || env->current_editor == NULL) {
         return false;
+    }
 
     editor_t* eb = env->current_editor;
     eb->request_submit = true;
@@ -4729,8 +4862,9 @@ ic_public bool ic_current_loop_advance_with_prompt(const char* new_buffer,
                                                    const char* preserved_prompt,
                                                    const char* preserved_inline_right) {
     ic_env_t* env = ic_get_env();
-    if (env == NULL || env->current_editor == NULL)
+    if (env == NULL || env->current_editor == NULL) {
         return false;
+    }
 
     editor_t* eb = env->current_editor;
     const char* original_inline_right = eb->inline_right_text;
@@ -4738,8 +4872,9 @@ ic_public bool ic_current_loop_advance_with_prompt(const char* new_buffer,
 
     if (preserved_prompt != NULL) {
         original_prompt = sbuf_new(env->mem);
-        if (original_prompt == NULL)
+        if (original_prompt == NULL) {
             return false;
+        }
         if (eb->prompt_prefix_text != NULL) {
             (void)sbuf_append(original_prompt, eb->prompt_prefix_text);
         }
@@ -4836,8 +4971,9 @@ ic_public bool ic_show_menu_ex(const char* prompt_text, const ic_menu_item_t* it
 ic_public bool ic_current_loop_reset(const char* new_buffer, const char* new_prompt,
                                      const char* new_inline_right) {
     ic_env_t* env = ic_get_env();
-    if (env == NULL || env->current_editor == NULL)
+    if (env == NULL || env->current_editor == NULL) {
         return false;
+    }
 
     editor_t* eb = env->current_editor;
 

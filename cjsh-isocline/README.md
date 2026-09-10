@@ -88,6 +88,26 @@ Users can type to fuzzy-filter labels, descriptions, and keywords. Up/Down, Ctrl
 Shift+Up/Down, Enter/Tab, Escape, Alt+C, and menu mouse interactions follow the existing Isocline
 menu controls.
 
+All menus default to a maximum of 50 visible content rows, including expanded previews, and shrink
+to fit the terminal. Use `ic_set_menu_max_line_count(count)` to change the limit (1 through 256)
+and `ic_get_menu_max_line_count()` to read it. Headers and help text use separate rows. Menus share
+the multiline scroll margin configured by `ic_set_multiline_bottom_line_count()`, which defaults
+to 3 rows around the selection.
+
+## Testing
+
+Run all automated tests through CTest from the repository root:
+
+```bash
+ctest --preset release --parallel 4
+```
+
+This includes isocline behavior and PTY integration coverage alongside the shell
+and other focused suites. Configure the build with Python 3 installed to include
+the Python suites. See
+[Local Verification](../CONTRIBUTING.md#local-verification) for selecting suites
+and repeating failures.
+
 ## Upstream and license
 
 This module is distributed under the MIT License as part of CJ's Shell.

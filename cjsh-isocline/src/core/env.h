@@ -28,7 +28,6 @@
   SOFTWARE.
 */
 
-#pragma once
 #ifndef IC_ENV_H
 #define IC_ENV_H
 
@@ -152,7 +151,8 @@ struct ic_env_s {
     uint8_t terminal_region_state;                     // current OSC 133 lifecycle state
     size_t multiline_start_line_count;   // prefill multiline prompts with this many lines
     size_t multiline_max_line_count;     // maximum visible input rows in multiline mode
-    size_t multiline_bottom_line_count;  // content-row margin kept around the cursor
+    size_t multiline_bottom_line_count;  // content-row margin around the cursor or menu selection
+    size_t menu_max_line_count;          // maximum visible menu content rows
     long hint_delay;                     // delay before displaying a hint in milliseconds
     long idle_timeout;                   // inactivity timeout in milliseconds (0 disables)
 
@@ -167,10 +167,13 @@ struct ic_env_s {
 
     ic_command_palette_entry_internal_t* command_palette_entries;
     ssize_t command_palette_entry_count;
+    size_t command_palette_generation;
     ic_command_palette_entry_handler_t* command_palette_handler;
     void* command_palette_handler_arg;
 
     char* whitespace_marker;  // custom marker used when visualizing spaces
+    char line_wrap_marker[5];        // one UTF-8 code point, or empty to hide soft-wrap indicators
+    ssize_t line_wrap_marker_width;  // terminal columns reserved for the marker
 };
 
 ic_private char* ic_editline(ic_env_t* env, const char* prompt_text, const char* inline_right_text);

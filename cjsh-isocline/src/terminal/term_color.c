@@ -170,8 +170,9 @@ typedef struct rgb_cache_s {
 
 // remember a color in the LRU cache
 void rgb_remember(rgb_cache_t* cache, ic_color_t color, int idx) {
-    if (cache == NULL)
+    if (cache == NULL) {
         return;
+    }
     cache->colors[cache->last] = color;
     cache->indices[cache->last] = idx;
     cache->last++;
@@ -184,8 +185,9 @@ void rgb_remember(rgb_cache_t* cache, ic_color_t color, int idx) {
 int rgb_lookup(const rgb_cache_t* cache, ic_color_t color) {
     if (cache != NULL) {
         for (int i = 0; i < RGB_CACHE_LEN; i++) {
-            if (cache->colors[i] == color)
+            if (cache->colors[i] == color) {
                 return cache->indices[i];
+            }
         }
     }
     return -1;
@@ -267,8 +269,9 @@ static int color_to_ansi8(ic_color_t color) {
         // and then adjust for brightness
         int r, g, b;
         color_to_rgb(color, &r, &g, &b);
-        if (r >= 196 || g >= 196 || b >= 196)
+        if (r >= 196 || g >= 196 || b >= 196) {
             c += 60;
+        }
         // debug_msg("term: rgb %x -> ansi 8: %d\n", color, c );
         return c;
     }
@@ -281,21 +284,22 @@ static int color_to_ansi8(ic_color_t color) {
 static void fmt_color_ansi8(char* buf, ssize_t len, ic_color_t color, bool bg) {
     int c = color_to_ansi8(color) + (bg ? 10 : 0);
     if (c >= 90) {
-        snprintf(buf, to_size_t(len), IC_CSI "1;%dm", c - 60);
+        (void)snprintf(buf, to_size_t(len), IC_CSI "1;%dm", c - 60);
     } else {
-        snprintf(buf, to_size_t(len), IC_CSI "22;%dm", c);
+        (void)snprintf(buf, to_size_t(len), IC_CSI "22;%dm", c);
     }
 }
 
 static void fmt_color_ansi16(char* buf, ssize_t len, ic_color_t color, bool bg) {
-    snprintf(buf, to_size_t(len), IC_CSI "%dm", color_to_ansi16(color) + (bg ? 10 : 0));
+    (void)snprintf(buf, to_size_t(len), IC_CSI "%dm", color_to_ansi16(color) + (bg ? 10 : 0));
 }
 
 static void fmt_color_ansi256(char* buf, ssize_t len, ic_color_t color, bool bg) {
     if (!color_is_rgb(color)) {
         fmt_color_ansi16(buf, len, color, bg);
     } else {
-        snprintf(buf, to_size_t(len), IC_CSI "%d;5;%dm", (bg ? 48 : 38), rgb_to_ansi256(color));
+        (void)snprintf(buf, to_size_t(len), IC_CSI "%d;5;%dm", (bg ? 48 : 38),
+                       rgb_to_ansi256(color));
     }
 }
 
@@ -305,14 +309,15 @@ static void fmt_color_rgb(char* buf, ssize_t len, ic_color_t color, bool bg) {
     } else {
         int r, g, b;
         color_to_rgb(color, &r, &g, &b);
-        snprintf(buf, to_size_t(len), IC_CSI "%d;2;%d;%d;%dm", (bg ? 48 : 38), r, g, b);
+        (void)snprintf(buf, to_size_t(len), IC_CSI "%d;2;%d;%d;%dm", (bg ? 48 : 38), r, g, b);
     }
 }
 
 static void fmt_color_ex(char* buf, ssize_t len, palette_t palette, ic_color_t color, bool bg) {
     if (color == IC_COLOR_NONE || palette == MONOCHROME) {
-        if (len > 0)
+        if (len > 0) {
             buf[0] = '\0';
+        }
         return;
     }
     if (palette == ANSI8) {
@@ -345,8 +350,9 @@ ic_private void term_bgcolor(term_t* term, ic_color_t color) {
 }
 
 ic_private void term_underline_color(term_t* term, ic_color_t color) {
-    if (color == IC_COLOR_NONE || term->palette == MONOCHROME)
+    if (color == IC_COLOR_NONE || term->palette == MONOCHROME) {
         return;
+    }
     if (color == IC_ANSI_DEFAULT) {
         term_write(term, IC_CSI "59m");
         return;

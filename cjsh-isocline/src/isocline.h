@@ -28,7 +28,6 @@
   SOFTWARE.
 */
 
-#pragma once
 #ifndef IC_ISOCLINE_H
 #define IC_ISOCLINE_H
 
@@ -208,6 +207,13 @@ bool ic_suspend_readline_terminal(void);
 /// `ic_suspend_readline_terminal()`.
 /// @returns true when a suspended editor was resumed, false otherwise.
 bool ic_resume_readline_terminal(void);
+
+/// Leave input capture modes before executing commands, preserving queued input.
+void ic_prepare_terminal_for_command(void);
+
+/// Adopt foreground-command terminal changes and repair the modes needed by the
+/// next prompt. Call after reclaiming terminal ownership and before prompt hooks.
+void ic_recover_terminal(void);
 
 /// An item displayed by ic_show_menu().
 typedef struct ic_menu_item_s {
@@ -524,6 +530,13 @@ void ic_history_add(const char* entry);
 /// Force save in-memory history to the history file.
 void ic_history_save(void);
 
+/// Decode one persisted history entry without trimming it. The output buffer must have
+/// room for encoded_length + 1 bytes and may be the same buffer as encoded.
+/// Return false for malformed escapes or insufficient capacity; decoded_length excludes
+/// the terminating zero and is set to zero on failure.
+bool ic_history_decode_entry(const char* encoded, size_t encoded_length, char* decoded,
+                             size_t decoded_capacity, size_t* decoded_length);
+
 /// \}
 
 //--------------------------------------------------------------
@@ -768,6 +781,8 @@ const char* ic_get_command_palette_prompt(void);
 /// Disable or enable multi-line input (enabled by default).
 /// Returns the previous setting.
 bool ic_enable_multiline(bool enable);
+/// Return the current setting without changing it.
+bool ic_multiline_is_enabled(void);
 
 /// Configure whether Enter retains the trailing continuation character when it starts a new
 /// multiline input row. When disabled (default), the continuation character is replaced by the
@@ -783,6 +798,11 @@ bool ic_enable_beep(bool enable);
 /// Disable or enable color output (enabled by default).
 /// Returns the previous setting.
 bool ic_enable_color(bool enable);
+
+/// Automatically record submitted readline input (default: true). Disable when
+/// the host records commands with metadata after execution. Drafts stay private.
+/// Returns the previous setting.
+bool ic_enable_history_auto_add(bool enable);
 
 /// Disable or enable duplicate entries in the history (disabled by default).
 /// Returns the previous setting.
@@ -826,16 +846,22 @@ ic_history_search_sort_t ic_get_history_search_sort(const char** metadata_key);
 /// to expand as far as possible if the completions are unique. (disabled by
 /// default). Returns the previous setting.
 bool ic_enable_auto_tab(bool enable);
+/// Return the current setting without changing it.
+bool ic_auto_tab_is_enabled(void);
 
 /// Disable or enable preview of a completion selection (enabled by default)
 /// Returns the previous setting.
 bool ic_enable_completion_preview(bool enable);
+/// Return the current setting without changing it.
+bool ic_completion_preview_is_enabled(void);
 
 /// Configure whether completion menus open in expanded mode by default (disabled by default).
 /// When enabled, the first completion menu view uses the full single-column layout without
 /// requiring PgDn/ctrl-j to expand.
 /// Returns the previous setting.
 bool ic_enable_completion_menu_start_expanded(bool enable);
+/// Return the current setting without changing it.
+bool ic_completion_menu_start_expanded_is_enabled(void);
 
 /// Enable or disable click-to-accept for completion candidates (disabled by default).
 /// Returns the previous setting.
@@ -867,6 +893,8 @@ ic_menu_highlight_mode_t ic_get_menu_highlight_mode(void);
 /// automatic continuation. (enabled by default)
 /// Returns the previous setting.
 bool ic_enable_multiline_indent(bool enable);
+/// Return the current setting without changing it.
+bool ic_multiline_indent_is_enabled(void);
 
 /// Configure how many lines the editor should preallocate when multiline editing is enabled.
 /// The default is 1, which means the cursor starts on the first prompt line. Larger values
@@ -888,15 +916,24 @@ size_t ic_set_multiline_max_line_count(size_t line_count);
 /// Get the current maximum number of visible input rows for multiline editing.
 size_t ic_get_multiline_max_line_count(void);
 
-/// Configure the multiline viewport's symmetric cursor margin. The editor retains up to this many
-/// existing input rows below the cursor when moving down and above it when moving up. The default
-/// is 3. Blank rows are never inserted to satisfy the margin. A value of 0 disables the margin,
-/// and values above 256 are clamped to 256.
+/// Configure the symmetric scroll margin for multiline input and menus. The editor retains up to
+/// this many existing rows below the cursor or selection when moving down and above it when moving
+/// up. The default is 3. Blank rows are never inserted to satisfy the margin. A value of 0 disables
+/// the margin, and values above 256 are clamped to 256.
 /// Returns the previous configured line count.
 size_t ic_set_multiline_bottom_line_count(size_t line_count);
 
-/// Get the preferred number of content rows retained around the multiline cursor.
+/// Get the preferred number of content rows retained around the cursor or menu selection.
 size_t ic_get_multiline_bottom_line_count(void);
+
+/// Configure the maximum visible content rows in completion, history, command palette, and custom
+/// menus, including expanded item previews. The default is 50. Headers and help text use separate
+/// rows, and menus shrink to fit the terminal. Values are clamped to the range 1 through 256.
+/// Returns the previous configured line count.
+size_t ic_set_menu_max_line_count(size_t line_count);
+
+/// Get the current maximum number of visible menu content rows.
+size_t ic_get_menu_max_line_count(void);
 
 /// Enable or disable line numbers in multiline input mode. (enabled by default)
 /// When enabled, each line will be prefixed with a line number (e.g., "2| ", "3| ", etc.).
@@ -947,10 +984,23 @@ bool ic_enable_current_line_number_highlight(bool enable);
 /// Returns whether current line number highlighting is enabled.
 bool ic_current_line_number_highlight_is_enabled(void);
 
+/// Set the marker at the end of soft-wrapped editor rows. The string is copied and must be
+/// empty (disable the marker) or exactly one printable UTF-8 code point with positive display
+/// width. Passing NULL restores the default: a return symbol on macOS, a left arrow elsewhere.
+/// The marker reserves its display width; an empty marker lets input use the full terminal width.
+/// Non-ASCII markers are shown only on UTF-8 terminals. Input contents and the newline printed
+/// after submitting input are unaffected. Returns false without changing the marker on failure.
+bool ic_set_line_wrap_marker(const char* marker);
+/// Get the current marker (empty when disabled). The returned string is owned by isocline and
+/// remains valid until the next successful setter call. Returns NULL if initialization fails.
+const char* ic_get_line_wrap_marker(void);
+
 /// Enable or disable visualization of plain space characters inside the buffer (disabled by
 /// default). When enabled, every space is rendered using the whitespace marker returned by
 /// `ic_get_whitespace_marker()`. Returns the previous state.
 bool ic_enable_visible_whitespace(bool enable);
+/// Return the current setting without changing it.
+bool ic_visible_whitespace_is_enabled(void);
 
 /// Set the marker string used when visualizing spaces. The string is copied so the caller retains
 /// ownership. Passing NULL or an empty string restores the default middle-dot marker.
@@ -963,6 +1013,8 @@ const char* ic_get_whitespace_marker(void);
 /// (full help is always dispayed when pressing F1 regardless of this setting)
 /// @returns the previous setting.
 bool ic_enable_inline_help(bool enable);
+/// Return the current setting without changing it.
+bool ic_inline_help_is_enabled(void);
 
 /// Enable or disable cursor-tracking for the inline right prompt (RPS1).
 /// When enabled, the right-aligned prompt is re-rendered on the same terminal row as the cursor
@@ -982,11 +1034,15 @@ bool ic_enable_mouse_clicking(bool enable);
 /// Disabling this hides the indicator text but does not disable mouse clicking support itself.
 /// Returns the previous setting.
 bool ic_enable_mouse_reporting_status_line(bool enable);
+/// Return the current setting without changing it.
+bool ic_mouse_reporting_status_line_is_enabled(void);
 
 /// Disable or enable hinting (enabled by default)
 /// Shows a hint inline when there is a single possible completion.
 /// @returns the previous setting.
 bool ic_enable_hint(bool enable);
+/// Return the current setting without changing it.
+bool ic_hint_is_enabled(void);
 
 /// Disable or enable spell correction in completion (enabled by default).
 /// When enabled and no completion matches, tab will try to correct the
@@ -1196,6 +1252,10 @@ const char* ic_completion_input(ic_completion_env_t* cenv, long* cursor);
 
 /// Get the completion argument passed to `ic_set_completer`.
 void* ic_completion_arg(const ic_completion_env_t* cenv);
+
+/// Is this an automatic inline hint? Completers should avoid expensive work
+/// such as launching processes when this returns true.
+bool ic_completion_is_hint(const ic_completion_env_t* cenv);
 
 /// Do we have already some completions?
 bool ic_has_completions(const ic_completion_env_t* cenv);

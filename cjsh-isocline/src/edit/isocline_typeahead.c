@@ -35,7 +35,9 @@
 #include "isocline_typeahead.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
+#include <sys/types.h>
 
 #include "common.h"
 #include "env.h"
@@ -348,6 +350,25 @@ ic_public bool ic_enable_typeahead(bool enable) {
 ic_public bool ic_typeahead_is_enabled(void) {
     ic_env_t* env = ic_get_env();
     return (env != NULL && env->typeahead_enabled);
+}
+
+ic_public void ic_prepare_terminal_for_command(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL || env->tty == NULL) {
+        return;
+    }
+    (void)ic_typeahead_capture_available_input();
+    tty_enable_typeahead_capture_mode(env->tty, false);
+}
+
+ic_public void ic_recover_terminal(void) {
+    ic_env_t* env = ic_get_env();
+    if (env == NULL || env->tty == NULL) {
+        return;
+    }
+    (void)ic_typeahead_capture_available_input();
+    tty_adopt_external_modes(env->tty);
+    tty_enable_typeahead_capture_mode(env->tty, false);
 }
 
 ic_public void ic_set_typeahead_capture_allowed_callback(

@@ -1,10 +1,32 @@
 /*
   editline_menu.c
 
-  Shared helpers for editline menus. This file is included in editline.c.
+  This file is part of isocline
 
   MIT License
+
+  Copyright (c) 2026 Caden Finley
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
 */
+
+/* Shared helpers for editline menus. This file is included in editline.c. */
 
 typedef struct edit_menu_session_s {
     const char* prompt_text;
@@ -101,8 +123,7 @@ static bool edit_menu_mouse_prepare_key(ic_env_t* env, editor_t* eb, code_t key,
     if (*suspended && key_no_mods == KEY_EVENT_MOUSE_OTHER) {
         return true;
     }
-    if (key_no_mods == KEY_EVENT_MOUSE_OTHER &&
-        (*scroll_enabled || eb->mouse_reporting_enabled)) {
+    if (key_no_mods == KEY_EVENT_MOUSE_OTHER && (*scroll_enabled || eb->mouse_reporting_enabled)) {
         tty_mouse_event_t event;
         if (tty_get_last_mouse_event(env->tty, &event) && edit_mouse_event_is_drag(eb, &event)) {
             return edit_menu_mouse_suspend(env, eb, scroll_enabled, suspended);
@@ -217,7 +238,7 @@ static bool edit_menu_append_color_property(stringbuf_t* sb, bool* first, const 
     if (ansi_index >= 0) {
         (void)sbuf_appendf(sb, "%s=%d", ansi_name, ansi_index);
     } else {
-        (void)sbuf_appendf(sb, "%s=#%06x", rgb_name, (unsigned int)(color & 0xFFFFFFu));
+        (void)sbuf_appendf(sb, "%s=#%06x", rgb_name, (color & 0xFFFFFFu));
     }
     return true;
 }
@@ -654,8 +675,8 @@ static ssize_t edit_menu_input_rows(ic_env_t* env, editor_t* eb) {
 
     rowcol_t rc_dummy;
     memset(&rc_dummy, 0, sizeof(rc_dummy));
-    ssize_t input_rows =
-        sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw, input_len, &rc_dummy);
+    ssize_t input_rows = sbuf_get_rc_at_pos(eb->input, eb->termw, promptw, cpromptw,
+                                            env->line_wrap_marker_width, input_len, &rc_dummy);
     if (input_rows <= 0) {
         input_rows = 1;
     }
@@ -671,6 +692,9 @@ static ssize_t edit_menu_available_lines(ic_env_t* env, editor_t* eb, ssize_t re
     ssize_t available_lines = edit_available_terminal_rows(env, eb) - reserved_rows;
     if (available_lines < min_lines) {
         available_lines = min_lines;
+    }
+    if (available_lines > (ssize_t)env->menu_max_line_count) {
+        available_lines = (ssize_t)env->menu_max_line_count;
     }
     return available_lines;
 }
@@ -688,8 +712,8 @@ static ssize_t edit_menu_rendered_rows(ic_env_t* env, editor_t* eb, const char* 
     bbcode_append(env->bbcode, text, rendered, NULL);
     rowcol_t rc_dummy;
     memset(&rc_dummy, 0, sizeof(rc_dummy));
-    ssize_t rows = sbuf_get_rc_at_pos(rendered, term_get_width(env->term), 0, 0, sbuf_len(rendered),
-                                      &rc_dummy);
+    ssize_t rows = sbuf_get_rc_at_pos(rendered, term_get_width(env->term), 0, 0,
+                                      env->line_wrap_marker_width, sbuf_len(rendered), &rc_dummy);
     if (sbuf_ends_with_newline(rendered) && rows > 0) {
         rows--;
     }
@@ -697,41 +721,32 @@ static ssize_t edit_menu_rendered_rows(ic_env_t* env, editor_t* eb, const char* 
     return (rows > 0 ? rows : 1);
 }
 
-static edit_menu_window_t edit_menu_window_for(ssize_t item_count, ssize_t requested_rows,
-                                               ssize_t selected_idx, ssize_t scroll_offset) {
-    edit_menu_window_t window = {0};
+static edit_menu_window_t edit_menu_window_for(ic_env_t* env, ssize_t item_count,
+                                               ssize_t requested_rows, ssize_t selected_idx,
+                                               ssize_t scroll_offset) {
     if (requested_rows < 1) {
         requested_rows = 1;
     }
 
-    window.display_count = (item_count > requested_rows ? requested_rows : item_count);
-    if (window.display_count < 1) {
-        window.display_count = 1;
-    }
-
-    window.max_scroll =
-        (item_count > window.display_count ? (item_count - window.display_count) : 0);
-    window.scroll_offset = scroll_offset;
-    if (window.scroll_offset > window.max_scroll) {
-        window.scroll_offset = window.max_scroll;
-    }
-    if (window.scroll_offset < 0) {
-        window.scroll_offset = 0;
-    }
-
-    if (selected_idx < window.scroll_offset) {
-        window.scroll_offset = selected_idx;
-    } else if (selected_idx >= window.scroll_offset + window.display_count) {
-        window.scroll_offset = selected_idx - window.display_count + 1;
-    }
-
-    if (window.scroll_offset < 0) {
-        window.scroll_offset = 0;
-    }
-    if (window.scroll_offset > window.max_scroll) {
-        window.scroll_offset = window.max_scroll;
-    }
+    const editline_viewport_t viewport =
+        editline_viewport_for(item_count, 0, selected_idx, requested_rows, env->menu_max_line_count,
+                              env->multiline_bottom_line_count, scroll_offset);
+    edit_menu_window_t window = {
+        .display_count = viewport.input_row_count,
+        .max_scroll =
+            (item_count > viewport.input_row_count ? item_count - viewport.input_row_count : 0),
+        .scroll_offset = viewport.input_first_row,
+    };
     return window;
+}
+
+static ssize_t edit_menu_page_selection(ic_env_t* env, ssize_t page, ssize_t scroll_offset) {
+    const ssize_t max_margin = (page - 1) / 2;
+    const ssize_t margin = (env->multiline_bottom_line_count < (size_t)max_margin
+                                ? (ssize_t)env->multiline_bottom_line_count
+                                : max_margin);
+    // Keep the selection inside the new page's margins so the next render preserves the page.
+    return scroll_offset + margin;
 }
 
 static bool edit_menu_page_down(ic_env_t* env, ssize_t item_count, ssize_t page, ssize_t max_scroll,
@@ -749,7 +764,7 @@ static bool edit_menu_page_down(ic_env_t* env, ssize_t item_count, ssize_t page,
     if (*scroll_offset > max_scroll) {
         *scroll_offset = max_scroll;
     }
-    *selected_idx = *scroll_offset;
+    *selected_idx = edit_menu_page_selection(env, page, *scroll_offset);
     if (*selected_idx >= item_count) {
         *selected_idx = item_count - 1;
     }
@@ -775,7 +790,7 @@ static bool edit_menu_page_up(ic_env_t* env, ssize_t item_count, ssize_t page,
     } else {
         *scroll_offset = 0;
     }
-    *selected_idx = *scroll_offset;
+    *selected_idx = edit_menu_page_selection(env, page, *scroll_offset);
     if (*selected_idx >= item_count) {
         *selected_idx = item_count - 1;
     }
@@ -874,8 +889,8 @@ static ssize_t edit_menu_multiline_preview_row_count(ic_env_t* env, const char* 
 
     sbuf_replace(preview, display);
     rowcol_t rc_dummy = {0};
-    ssize_t rows =
-        sbuf_get_rc_at_pos(preview, term_get_width(env->term), 2, 2, sbuf_len(preview), &rc_dummy);
+    ssize_t rows = sbuf_get_rc_at_pos(preview, term_get_width(env->term), 2, 2,
+                                      env->line_wrap_marker_width, sbuf_len(preview), &rc_dummy);
     sbuf_free(preview);
     const ssize_t logical_rows = edit_menu_line_count(display);
     if (rows < logical_rows) {
@@ -933,8 +948,8 @@ static ssize_t edit_menu_multiline_preview_visible_len(ic_env_t* env, const char
     sbuf_replace(preview, display);
     rowcol_t rc_dummy = {0};
     const ssize_t term_width = term_get_width(env->term);
-    const ssize_t rendered_rows =
-        sbuf_get_rc_at_pos(preview, term_width, 2, 2, display_len, &rc_dummy);
+    const ssize_t rendered_rows = sbuf_get_rc_at_pos(
+        preview, term_width, 2, 2, env->line_wrap_marker_width, display_len, &rc_dummy);
     const ssize_t logical_rows = edit_menu_line_count(display);
     if (rendered_rows <= max_rows && logical_rows <= max_rows) {
         sbuf_free(preview);
@@ -951,7 +966,8 @@ static ssize_t edit_menu_multiline_preview_visible_len(ic_env_t* env, const char
     }
     const ssize_t wrapped_visible_len =
         (rendered_rows > max_rows
-             ? sbuf_get_pos_at_rc(preview, term_width, 2, 2, max_rows - 1, last_row_columns)
+             ? sbuf_get_pos_at_rc(preview, term_width, 2, 2, env->line_wrap_marker_width,
+                                  max_rows - 1, last_row_columns)
              : display_len);
     sbuf_free(preview);
     if (rendered_rows > max_rows) {
@@ -1099,6 +1115,29 @@ static ssize_t edit_menu_visible_prefix(const char* s, ssize_t len, ssize_t max_
     return pos;
 }
 
+typedef struct edit_menu_preview_s {
+    ssize_t entry_len;
+    ssize_t visible_len;
+    bool append_ellipsis;
+} edit_menu_preview_t;
+
+static edit_menu_preview_t edit_menu_preview(const char* display, ssize_t max_columns) {
+    const char* line_end = edit_menu_first_line_end(display);
+    const ssize_t entry_len = line_end ? line_end - display : ic_strlen(display);
+    const bool multiline = line_end != NULL && (*line_end == '\n' || *line_end == '\r');
+    if (max_columns < 4) {
+        max_columns = 4;
+    }
+
+    ssize_t width = 0;
+    ssize_t visible_len = edit_menu_visible_prefix(display, entry_len, max_columns, &width);
+    const bool ellipsis = multiline || visible_len < entry_len;
+    if (ellipsis && width + 3 > max_columns) {
+        visible_len = edit_menu_visible_prefix(display, entry_len, max_columns - 3, NULL);
+    }
+    return (edit_menu_preview_t){entry_len, visible_len, ellipsis};
+}
+
 static void edit_menu_append_highlighted_prefix(stringbuf_t* sb, const char* display,
                                                 ssize_t visible_len, ssize_t entry_len,
                                                 ssize_t match_pos, ssize_t match_len, bool selected,
@@ -1232,4 +1271,72 @@ static bool edit_menu_mouse_event_is_left_click(ic_env_t* env) {
     }
     return (mouse_event.action == TTY_MOUSE_ACTION_LEFT_PRESS ||
             mouse_event.action == TTY_MOUSE_ACTION_LEFT_RELEASE);
+}
+
+// Shared menu input distinguishes changes to the search from navigation/redraws.
+typedef enum edit_menu_input_e {
+    EDIT_MENU_INPUT_UNHANDLED,
+    EDIT_MENU_INPUT_SELECTION,
+    EDIT_MENU_INPUT_QUERY,
+    EDIT_MENU_INPUT_CASE
+} edit_menu_input_t;
+
+static bool edit_menu_read_event(ic_env_t* env, editor_t* eb, edit_menu_session_t* session,
+                                 code_t* key) {
+    *key = KEY_ESC;
+    (void)edit_menu_read_key(env, eb, key);
+    if (tty_term_resize_event(env->tty)) {
+        (void)edit_resize(env, eb);
+    }
+    sbuf_clear(eb->extra);
+    return !edit_menu_mouse_prepare_key(env, eb, *key, true, &session->mouse_scroll_enabled,
+                                        &session->mouse_suspended);
+}
+
+static edit_menu_input_t edit_menu_handle_input(ic_env_t* env, editor_t* eb, code_t key,
+                                                const edit_menu_session_t* session, ssize_t count,
+                                                ssize_t display_count, ssize_t max_scroll,
+                                                ssize_t* scroll_offset, ssize_t* selected,
+                                                bool* case_sensitive, bool allow_live_input) {
+    const code_t plain = KEY_NO_MODS(key);
+    if ((KEY_MODS(key) & KEY_MOD_SHIFT) && plain == KEY_DOWN) {
+        (void)edit_menu_page_down(env, count, display_count, max_scroll, scroll_offset, selected);
+    } else if ((KEY_MODS(key) & KEY_MOD_SHIFT) && plain == KEY_UP) {
+        (void)edit_menu_page_up(env, count, display_count, scroll_offset, selected);
+    } else if ((KEY_MODS(key) & KEY_MOD_ALT) && (plain == 'c' || plain == 'C')) {
+        *case_sensitive = !*case_sensitive;
+        return EDIT_MENU_INPUT_CASE;
+    } else if (plain == KEY_UP || key == KEY_CTRL_P ||
+               (session->mouse_scroll_enabled && plain == KEY_EVENT_MOUSE_WHEEL_UP)) {
+        if (allow_live_input && *selected == 0) {
+            *selected = -1;
+        } else {
+            (void)edit_menu_move_selection(env, count, -1, selected);
+        }
+    } else if (plain == KEY_DOWN || key == KEY_CTRL_N ||
+               (session->mouse_scroll_enabled && plain == KEY_EVENT_MOUSE_WHEEL_DOWN)) {
+        (void)edit_menu_move_selection(env, count, 1, selected);
+    } else if (key == KEY_BACKSP) {
+        if (eb->pos > 0) {
+            edit_backspace(env, eb);
+            return EDIT_MENU_INPUT_QUERY;
+        }
+    } else if (key == KEY_DEL) {
+        edit_delete_char(env, eb);
+        return EDIT_MENU_INPUT_QUERY;
+    } else if (key == KEY_F1) {
+        edit_show_help(env, eb);
+    } else {
+        char chr;
+        unicode_t uchr;
+        if (code_is_ascii_char(key, &chr)) {
+            edit_insert_char(env, eb, chr);
+        } else if (code_is_unicode(key, &uchr)) {
+            edit_insert_unicode(env, eb, uchr);
+        } else {
+            return EDIT_MENU_INPUT_UNHANDLED;
+        }
+        return EDIT_MENU_INPUT_QUERY;
+    }
+    return EDIT_MENU_INPUT_SELECTION;
 }

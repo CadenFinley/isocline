@@ -110,17 +110,13 @@ static const char* completion_single_line_view(alloc_t* mem, const char* display
 }
 
 static const char* completion_source_view(alloc_t* mem, const char* source, ssize_t max_chars,
-                                          bool allow_full_length, char** allocated) {
+                                          char** allocated) {
     if (allocated != NULL) {
         *allocated = NULL;
     }
     if (source == NULL) {
         return NULL;
     }
-    if (allow_full_length) {
-        return source;
-    }
-
     const char* line_end = edit_menu_first_line_end(source);
     ssize_t len = (line_end == NULL ? ic_strlen(source) : (ssize_t)(line_end - source));
     bool multiline = (line_end != NULL && (*line_end == '\n' || *line_end == '\r'));
@@ -162,8 +158,9 @@ static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, s
     const char* help = NULL;
     const char* display = completions_get_display(env->completions, idx, &help);
     const char* source = completions_get_source(env->completions, idx);
-    if (display == NULL)
+    if (display == NULL) {
         return;
+    }
 
     const char* arrow = (tty_is_utf8(env->tty) ? "\xE2\x86\x92" : ">");
     ssize_t width_remaining = width;
@@ -178,8 +175,8 @@ static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, s
     width_remaining -= prefix_width;
     (void)sbuf_appendf(eb->extra, "%s ", (selected ? arrow : " "));
 
-    bool display_has_line_break = edit_menu_contains_line_break(display);
-    bool apply_width_constraint = (width_remaining > 0) && (!selected || display_has_line_break);
+    // Menu sizing and mouse hit testing both rely on one physical row per item.
+    bool apply_width_constraint = (width_remaining > 0);
     if (apply_width_constraint) {
         (void)sbuf_appendf(eb->extra, "[width=\"%zd;left; ;on\"]", width_remaining);
     }
@@ -205,9 +202,7 @@ static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, s
     char* source_alloc = NULL;
     if (source != NULL) {
         ssize_t limit = IC_LARGE_MENU_SOURCE_LIMIT;
-        bool allow_full_source = selected;
-        source_display =
-            completion_source_view(env->mem, source, limit, allow_full_source, &source_alloc);
+        source_display = completion_source_view(env->mem, source, limit, &source_alloc);
     }
     if (source_display != NULL) {
         (void)sbuf_append(eb->extra, " ");
@@ -217,8 +212,11 @@ static void editor_append_completion(ic_env_t* env, editor_t* eb, ssize_t idx, s
     }
 
     if (help != NULL) {
+        char* help_alloc = NULL;
+        const char* help_display = completion_single_line_view(env->mem, help, &help_alloc);
         (void)sbuf_append(eb->extra, "  ");
-        sbuf_append_tagged(eb->extra, help_style, help);
+        sbuf_append_tagged(eb->extra, help_style, help_display);
+        mem_free(env->mem, help_alloc);
     }
     if (apply_width_constraint) {
         (void)sbuf_append(eb->extra, "[/width]");
@@ -246,7 +244,7 @@ static ssize_t edit_completions_max_width(ic_env_t* env, ssize_t count, ssize_t 
         if (source != NULL) {
             char* source_alloc = NULL;
             const char* limited_source =
-                completion_source_view(env->mem, source, source_limit, false, &source_alloc);
+                completion_source_view(env->mem, source, source_limit, &source_alloc);
             if (limited_source != NULL) {
                 w += 3 + bbcode_column_width(env->bbcode, limited_source);
             }
@@ -272,17 +270,20 @@ static void edit_completion_menu_update_hint(ic_env_t* env, editor_t* eb, bool a
     sbuf_clear(eb->hint);
     sbuf_clear(eb->hint_help);
 
-    if (env->no_hint || edit_current_line_is_empty(eb))
+    if (env->no_hint || edit_current_line_is_empty(eb)) {
         return;
+    }
 
     ssize_t hint_count = completions_count(env->completions);
-    if (hint_count <= 0)
+    if (hint_count <= 0) {
         return;
+    }
 
     const char* help = NULL;
     const char* hint = completions_get_hint(env->completions, 0, &help);
-    if (hint == NULL || *hint == '\0')
+    if (hint == NULL || *hint == '\0') {
         return;
+    }
 
     if (allow_inline_hint) {
         sbuf_replace(eb->hint, hint);
@@ -292,16 +293,9 @@ static void edit_completion_menu_update_hint(ic_env_t* env, editor_t* eb, bool a
     }
 }
 
-static ssize_t edit_completion_available_rows_for_input(ic_env_t* env, editor_t* eb,
-                                                        ssize_t input_rows) {
-    ssize_t available_rows = edit_available_terminal_rows(env, eb) - input_rows;
-    if (available_rows < 3) {
-        available_rows = 3;
-    }
-    return available_rows;
-}
-
-static ssize_t edit_completion_preview_input_rows(ic_env_t* env, editor_t* eb, ssize_t selected) {
+static ssize_t edit_completion_preview_input_rows(ic_env_t* env, editor_t* eb, ssize_t selected,
+                                                  ssize_t reserved_rows, ssize_t* preview_len) {
+    *preview_len = -1;
     ssize_t current_rows = edit_menu_input_rows(env, eb);
     if (env == NULL || eb == NULL || env->complete_nopreview || selected < 0 ||
         env->completions == NULL || eb->input == NULL) {
@@ -360,7 +354,42 @@ static ssize_t edit_completion_preview_input_rows(ic_env_t* env, editor_t* eb, s
     rowcol_t rc_dummy;
     memset(&rc_dummy, 0, sizeof(rc_dummy));
     ssize_t preview_rows =
-        sbuf_get_rc_at_pos(preview, eb->termw, promptw, cpromptw, sbuf_len(preview), &rc_dummy);
+        sbuf_get_rc_at_pos(preview, eb->termw, promptw, cpromptw, env->line_wrap_marker_width,
+                           sbuf_len(preview), &rc_dummy);
+
+    ssize_t max_preview_rows = edit_available_terminal_rows(env, eb) - reserved_rows;
+    if (max_preview_rows < 1) {
+        max_preview_rows = 1;
+    }
+    max_preview_rows = edit_visible_input_row_count(env, eb, max_preview_rows);
+    if (preview_rows > max_preview_rows) {
+        // Keep the beginning (and prompt) visible instead of scrolling to the end of a tall
+        // replacement. Only the temporary preview is shortened; acceptance applies the full text.
+        // Leave room for the dots and cursor so the shortened preview stays on this row.
+        ssize_t last_columns = eb->termw - (max_preview_rows == 1 ? promptw : cpromptw) - 4;
+        if (last_columns < 0) {
+            last_columns = 0;
+        }
+        ssize_t visible_len =
+            sbuf_get_pos_at_rc(preview, eb->termw, promptw, cpromptw, env->line_wrap_marker_width,
+                               max_preview_rows - 1, last_columns);
+        if (visible_len < 0) {
+            visible_len = 0;
+        }
+        rowcol_t visible_rc = {0};
+        (void)sbuf_get_rc_at_pos(preview, eb->termw, promptw, cpromptw, env->line_wrap_marker_width,
+                                 visible_len, &visible_rc);
+        if (visible_len > 0 && visible_rc.col > last_columns) {
+            // A wide character can straddle the requested column.
+            visible_len = sbuf_prev(preview, visible_len, NULL);
+        }
+        while (visible_len > 0 && (sbuf_char_at(preview, visible_len - 1) == '\n' ||
+                                   sbuf_char_at(preview, visible_len - 1) == '\r')) {
+            visible_len--;
+        }
+        *preview_len = visible_len;
+        preview_rows = max_preview_rows;
+    }
     sbuf_free(preview);
 
     if (preview_rows <= 0) {
@@ -375,16 +404,13 @@ static ssize_t edit_completion_collapsed_item_limit(ic_env_t* env, editor_t* eb,
         return 0;
     }
 
-    const ssize_t available_rows = edit_completion_available_rows_for_input(env, eb, input_rows);
     ssize_t item_limit = count;
     if (item_limit > IC_COLLAPSED_COMPLETION_MAX_ITEMS) {
         item_limit = IC_COLLAPSED_COMPLETION_MAX_ITEMS;
     }
 
-    ssize_t rows_for_items = available_rows - reserved_rows;
-    if (rows_for_items < 1) {
-        rows_for_items = 1;
-    }
+    const ssize_t rows_for_items =
+        edit_menu_available_lines(env, eb, input_rows + reserved_rows, 1);
     if (item_limit > rows_for_items) {
         item_limit = rows_for_items;
     }
@@ -419,8 +445,8 @@ static ssize_t edit_completion_menu_header_rows(ic_env_t* env, editor_t* eb, ssi
     }
 
     char header[384];
-    snprintf(header, sizeof(header), "[ic-info]Showing %zd-%zd of %zd completions%s%s[/]", count,
-             count, count, hint_suffix, (mouse_suffix != NULL ? mouse_suffix : ""));
+    (void)snprintf(header, sizeof(header), "[ic-info]Showing %zd-%zd of %zd completions%s%s[/]",
+                   count, count, count, hint_suffix, (mouse_suffix != NULL ? mouse_suffix : ""));
     return edit_menu_rendered_rows(env, eb, header);
 }
 
@@ -571,7 +597,6 @@ again:
                                            menu_mouse_scroll_enabled || eb->mouse_reporting_enabled,
                                            &menu_mouse_focus_reporting_added);
 
-    const ssize_t rendered_input_rows = edit_completion_preview_input_rows(env, eb, selected);
     const bool menu_mouse_click_enabled =
         (menu_mouse_scroll_enabled || eb->mouse_reporting_enabled);
     char mouse_suffix[EDIT_STATUS_HINT_BUFFER_LEN];
@@ -593,6 +618,16 @@ again:
     ssize_t footer_rows = edit_menu_rendered_rows(env, eb, footer);
     ssize_t header_rows = edit_completion_menu_header_rows(env, eb, count, expanded_mode,
                                                            more_available, mouse_suffix);
+    const ssize_t hint_help_rows = edit_menu_rendered_rows(env, eb, sbuf_string(eb->hint_help));
+    header_rows += hint_help_rows;
+    // A collapsed menu must retain the selected entry when its preview grows.
+    ssize_t min_items = (!expanded_mode && selected >= 0 ? selected + 1 : 1);
+    if (min_items > IC_COLLAPSED_COMPLETION_MAX_ITEMS) {
+        min_items = IC_COLLAPSED_COMPLETION_MAX_ITEMS;
+    }
+    ssize_t preview_len = -1;
+    ssize_t rendered_input_rows = edit_completion_preview_input_rows(
+        env, eb, selected, header_rows + footer_rows + min_items, &preview_len);
     count_displayed =
         (expanded_mode ? count
                        : edit_completion_collapsed_item_limit(env, eb, rendered_input_rows, count,
@@ -603,6 +638,8 @@ again:
         hidden_completions = final_hidden_completions;
         footer = edit_completion_menu_footer(expanded_mode, more_available, hidden_completions);
         footer_rows = edit_menu_rendered_rows(env, eb, footer);
+        rendered_input_rows = edit_completion_preview_input_rows(
+            env, eb, selected, header_rows + footer_rows + min_items, &preview_len);
         count_displayed = edit_completion_collapsed_item_limit(env, eb, rendered_input_rows, count,
                                                                header_rows + footer_rows);
     }
@@ -614,6 +651,7 @@ again:
     }
     if (selected >= count_displayed) {
         selected = (count_displayed > 0 ? count_displayed - 1 : -1);
+        goto again;
     }
 
     ssize_t twidth = term_get_width(env->term) - 1;
@@ -634,42 +672,15 @@ again:
     ssize_t rows_visible = total_rows;
     ssize_t max_scroll_offset = 0;
     if (expanded_mode) {
-        ssize_t available_rows =
-            edit_completion_available_rows_for_input(env, eb, rendered_input_rows);
-        ssize_t rows_for_items = available_rows - header_rows - footer_rows;
-        if (rows_for_items < 1) {
-            rows_for_items = 1;
-        }
-
-        rows_visible = (rows_for_items < total_rows ? rows_for_items : total_rows);
-        if (rows_visible < 1) {
-            rows_visible = 1;
-        }
-        max_scroll_offset = (total_rows > rows_visible ? total_rows - rows_visible : 0);
+        const ssize_t rows_for_items =
+            edit_menu_available_lines(env, eb, rendered_input_rows + header_rows + footer_rows, 1);
+        const edit_menu_window_t window =
+            edit_menu_window_for(env, total_rows, rows_for_items, selected, scroll_offset);
+        rows_visible = window.display_count;
+        max_scroll_offset = window.max_scroll;
+        scroll_offset = window.scroll_offset;
     } else {
         scroll_offset = 0;
-    }
-
-    if (scroll_offset > max_scroll_offset) {
-        scroll_offset = max_scroll_offset;
-    }
-    if (scroll_offset < 0) {
-        scroll_offset = 0;
-    }
-
-    if (expanded_mode && selected >= 0) {
-        ssize_t selected_row = selected % total_rows;
-        if (selected_row < scroll_offset) {
-            scroll_offset = selected_row;
-        } else if (selected_row >= scroll_offset + rows_visible) {
-            scroll_offset = selected_row - rows_visible + 1;
-        }
-        if (scroll_offset < 0) {
-            scroll_offset = 0;
-        }
-        if (scroll_offset > max_scroll_offset) {
-            scroll_offset = max_scroll_offset;
-        }
     }
 
     const ssize_t row_start = scroll_offset;
@@ -725,15 +736,16 @@ again:
     }
 
     if (visible_start > 0 && visible_end >= visible_start) {
-        snprintf(header, sizeof(header), "[ic-info]Showing %zd-%zd of %zd completions%s%s[/]\n",
-                 visible_start, visible_end, count, hint_suffix, mouse_suffix);
+        (void)snprintf(header, sizeof(header),
+                       "[ic-info]Showing %zd-%zd of %zd completions%s%s[/]\n", visible_start,
+                       visible_end, count, hint_suffix, mouse_suffix);
     } else {
-        snprintf(header, sizeof(header), "[ic-info]Showing %zd of %zd completions%s%s[/]\n",
-                 (visible_count > 0 ? visible_count : count_displayed), count, hint_suffix,
-                 mouse_suffix);
+        (void)snprintf(header, sizeof(header), "[ic-info]Showing %zd of %zd completions%s%s[/]\n",
+                       (visible_count > 0 ? visible_count : count_displayed), count, hint_suffix,
+                       mouse_suffix);
     }
     (void)sbuf_insert_at(eb->extra, header, 0);
-    last_header_rows = edit_menu_rendered_rows(env, eb, header);
+    last_header_rows = edit_menu_rendered_rows(env, eb, header) + hint_help_rows;
 
     last_rows_visible = rows_visible;
     last_max_scroll_offset = max_scroll_offset;
@@ -743,8 +755,17 @@ again:
 
         editor_start_modify(eb);
         ssize_t newpos = completions_apply(env->completions, selected, eb->input, eb->pos);
-        if (newpos >= 0) {
-            eb->pos = newpos;
+        if (newpos != IC_COMP_APPLY_FAIL) {
+            if (newpos >= 0) {
+                eb->pos = newpos;
+            }
+            if (preview_len >= 0 && preview_len < sbuf_len(eb->input)) {
+                sbuf_delete_at(eb->input, preview_len, sbuf_len(eb->input) - preview_len);
+                (void)sbuf_append(eb->input, "...");
+                if (eb->pos > sbuf_len(eb->input)) {
+                    eb->pos = sbuf_len(eb->input);
+                }
+            }
         }
 
         if (saved_menu != NULL) {
@@ -764,8 +785,11 @@ read_key:
         c = 0;
         goto cleanup;
     }
-    if (tty_term_resize_event(env->tty)) {
+    if (c == KEY_EVENT_RESIZE || tty_term_resize_event(env->tty)) {
         (void)edit_resize(env, eb);
+        if (c == KEY_EVENT_RESIZE) {
+            goto again;
+        }
     }
     sbuf_clear(eb->extra);
 
@@ -921,19 +945,7 @@ read_key:
         goto again;
     } else if (c == KEY_PAGEUP && expanded_mode) {
         c = 0;
-        if (last_rows_visible > 0 && scroll_offset > 0) {
-            ssize_t prev_offset = scroll_offset;
-            if (scroll_offset > last_rows_visible) {
-                scroll_offset -= last_rows_visible;
-            } else {
-                scroll_offset = 0;
-            }
-            if (scroll_offset == prev_offset) {
-                term_beep(env->term);
-            }
-        } else {
-            term_beep(env->term);
-        }
+        (void)edit_menu_page_up(env, count_displayed, last_rows_visible, &scroll_offset, &selected);
         goto again;
     } else {
         if (edit_key_is_mouse_toggle_binding(env, c)) {
@@ -1020,13 +1032,6 @@ read_key:
         } else if (triggered_by_ctrl_j) {
             expanded_mode = false;
             scroll_offset = 0;
-            const ssize_t collapsed_limit = edit_completion_collapsed_item_limit(
-                env, eb, edit_completion_preview_input_rows(env, eb, selected), count, 1);
-            if (collapsed_limit <= 0) {
-                selected = -1;
-            } else if (selected >= collapsed_limit) {
-                selected = collapsed_limit - 1;
-            }
         } else if (more_available) {
             ssize_t prev_count = count;
             count = completions_generate(env, env->completions, sbuf_string(eb->input), eb->pos,
@@ -1091,13 +1096,13 @@ cleanup:
     if (c != 0) {
         tty_code_pushback(env->tty, c);
     }
-    return;
 }
 
 static void edit_generate_completions(ic_env_t* env, editor_t* eb, bool autotab) {
     debug_msg("edit: complete: %zd: %s\n", eb->pos, sbuf_string(eb->input));
-    if (eb->pos < 0)
+    if (eb->pos < 0) {
         return;
+    }
     ssize_t count = completions_generate(env, env->completions, sbuf_string(eb->input), eb->pos,
                                          IC_MAX_COMPLETIONS_TO_TRY);
     bool more_available = (count >= IC_MAX_COMPLETIONS_TO_TRY);
@@ -1116,11 +1121,10 @@ static void edit_generate_completions(ic_env_t* env, editor_t* eb, bool autotab)
     }
     if (count <= 0) {
         // no completions
-        if (!autotab) {
-            if (!edit_try_spell_correct(env, eb)) {
-                term_beep(env->term);
-            }
+        if ((!autotab) && (!edit_try_spell_correct(env, eb))) {
+            term_beep(env->term);
         }
+
     } else if (count == 1) {
         // complete if only one match
         if (edit_complete(env, eb, 0 /*idx*/) && env->complete_autotab) {

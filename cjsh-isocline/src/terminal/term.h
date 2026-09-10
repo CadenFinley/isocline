@@ -28,7 +28,8 @@
   SOFTWARE.
 */
 
-#pragma once
+#ifndef CJSH_ISOCLINE_SRC_TERMINAL_TERM_H
+#define CJSH_ISOCLINE_SRC_TERMINAL_TERM_H
 #ifdef __cplusplus
 #include <cstdint>
 #else
@@ -108,7 +109,7 @@ ic_private void term_start_of_line(term_t* term);
 ic_private void term_clear_line(term_t* term);
 ic_private void term_clear_to_end_of_line(term_t* term);
 ic_private void term_delete_lines(term_t* term, ssize_t n);
-// ic_private void term_clear_lines_to_end(term_t* term);
+ic_private void term_clear_lines_to_end(term_t* term);
 
 ic_private void term_attr_reset(term_t* term);
 ic_private void term_underline(term_t* term, bool on);
@@ -130,3 +131,5 @@ ic_private void term_write_formatted_n(term_t* term, const char* s, const attr_t
 ic_private ic_color_t color_from_ansi256(ssize_t i);
 
 #endif  // IC_TERM_H
+
+#endif  // CJSH_ISOCLINE_SRC_TERMINAL_TERM_H
