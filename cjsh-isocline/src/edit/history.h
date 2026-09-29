@@ -59,8 +59,11 @@ typedef struct history_snapshot_s {
     struct stat file_status;
     bool has_file_status;
     bool loaded;
+    bool dedup;
+    bool disabled;
     bool had_pending;
     bool allow_duplicates;
+    size_t directory_revision;
     ssize_t max_entries;
     history_entry_t* entries;
     ssize_t count;
@@ -73,6 +76,14 @@ ic_private void history_clear(history_t* h);
 ic_private bool history_enable_duplicates(history_t* h, bool enable);
 ic_private bool history_set_fuzzy_case_sensitive(history_t* h, bool enable);
 ic_private bool history_is_fuzzy_case_sensitive(const history_t* h);
+ic_private bool history_enable_directory(history_t* h, bool enable);
+ic_private bool history_directory_is_enabled(const history_t* h);
+ic_private bool history_enable_directory_subdirs(history_t* h, bool enable);
+ic_private bool history_directory_subdirs_is_enabled(const history_t* h);
+ic_private bool history_enable_directory_parents(history_t* h, bool enable);
+ic_private bool history_directory_parents_is_enabled(const history_t* h);
+ic_private bool history_set_directory(history_t* h, const char* directory);
+ic_private bool history_matches_directory(const history_t* h, const char* directory);
 ic_private ssize_t history_count(const history_t* h);
 
 ic_private void history_load_from(history_t* h, const char* fname, long max_entries);
@@ -98,6 +109,7 @@ ic_private bool history_search_prefix(const history_t* h, ssize_t from, const ch
                                       bool backward, ssize_t* hidx);
 
 ic_private bool history_snapshot_load(history_t* h, history_snapshot_t* snap, bool dedup);
+ic_private bool history_snapshot_refresh(history_t* h, history_snapshot_t* snap, bool dedup);
 ic_private bool history_snapshot_is_current(const history_t* h, const history_snapshot_t* snap);
 ic_private void history_snapshot_free(history_t* h, history_snapshot_t* snap);
 ic_private const history_entry_t* history_snapshot_get(const history_snapshot_t* snap, ssize_t n);

@@ -204,7 +204,7 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->replace_prompt_line_with_line_number = false;  // keep final prompt line visible by default
     (void)ic_env_apply_line_wrap_marker(env, NULL);     // default soft-wrap indicator
     env->complete_nopreview = false;               // completion preview (inverted: false = enabled)
-    env->complete_menu_start_expanded = false;     // keep completion menu collapsed by default
+    env->completion_auto_menu = false;             // keep automatic completion menus opt-in
     env->completion_click_accept_enabled = false;  // keep click-to-accept off by default
     env->menu_highlight_mode = IC_MENU_HIGHLIGHT_NONE;  // keep menu items unhighlighted by default
     env->no_hint = false;                               // hint (inverted: false = enabled)
@@ -216,7 +216,10 @@ static ic_env_t* ic_env_create(ic_malloc_fun_t* _malloc, ic_realloc_fun_t* _real
     env->multiline_start_line_count = 1;         // preallocated prompt lines when multiline is on
     env->multiline_max_line_count = 15;          // visible input rows before viewport scrolling
     env->multiline_bottom_line_count = 3;        // row margin around the cursor or menu selection
-    env->menu_max_line_count = 50;               // visible menu content rows before scrolling
+    env->completion_menu_max_line_count = 15;   // visible content rows before scrolling
+    env->history_menu_max_line_count = 15;
+    env->command_palette_max_line_count = 15;
+    env->custom_menu_max_line_count = 15;
     env->last_readline_disposition = IC_READLINE_DISPOSITION_ERROR;
     env->status_hint_mode = IC_STATUS_HINT_NORMAL;  // default to legacy behavior
     env->mouse_reporting_mode =

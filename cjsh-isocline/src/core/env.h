@@ -119,7 +119,7 @@ struct ic_env_s {
     bool singleline_only;                  // allow only single line editing?
     bool complete_nopreview;               // do not show completion preview for each
                                            // selection in the completion menu?
-    bool complete_menu_start_expanded;     // open completion menus expanded by default?
+    bool completion_auto_menu;             // show passive completions while editing (Tab activates)
     bool completion_click_accept_enabled;  // should completion clicks accept immediately?
     ic_menu_highlight_mode_t menu_highlight_mode;  // syntax highlight completion/history menus
     bool complete_autotab;                         // try to keep completing after a completion?
@@ -152,7 +152,10 @@ struct ic_env_s {
     size_t multiline_start_line_count;   // prefill multiline prompts with this many lines
     size_t multiline_max_line_count;     // maximum visible input rows in multiline mode
     size_t multiline_bottom_line_count;  // content-row margin around the cursor or menu selection
-    size_t menu_max_line_count;          // maximum visible menu content rows
+    size_t completion_menu_max_line_count;  // maximum visible content rows per menu
+    size_t history_menu_max_line_count;
+    size_t command_palette_max_line_count;
+    size_t custom_menu_max_line_count;
     long hint_delay;                     // delay before displaying a hint in milliseconds
     long idle_timeout;                   // inactivity timeout in milliseconds (0 disables)
 

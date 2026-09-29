@@ -34,6 +34,10 @@
 
 #define MAX_COMMAND_PALETTE_RESULTS 128
 
+static const char* const k_command_palette_footer =
+    "[ic-diminish](↑↓/wheel:navigate shift+↑/↓:page enter/tab:run alt+c:case "
+    "ctrl+j:resize esc:cancel)[/]";
+
 typedef struct command_palette_action_entry_s {
     ic_key_action_t action;
     const char* name;
@@ -410,32 +414,32 @@ again:;
     }
 
     sbuf_clear(eb->extra);
+    menu_session.scrollbar.rows = 0;
     const char* mouse_suffix =
         (menu_session.mouse_scroll_enabled ? " | Mouse clicking is enabled" : "");
 
     if (match_count > 0) {
         const char* query = sbuf_string(eb->input);
         bool is_filtered = (query != NULL && query[0] != '\0');
-        ssize_t total_actions = command_palette_action_count() + command_palette_custom_count(env);
-
         if (showing_all_due_to_no_matches) {
             (void)sbuf_appendf(
                 eb->extra,
-                "[ic-info]No matches - showing all actions (%zd action%s) - case %s%s[/]\n",
-                total_actions, total_actions == 1 ? "" : "s",
+                "[ic-info]No matches - showing all actions - case %s%s[/]\n",
                 session_case_sensitive ? "sensitive" : "insensitive", mouse_suffix);
         } else if (is_filtered) {
-            (void)sbuf_appendf(eb->extra, "[ic-info]%zd action%s found - case %s%s[/]\n",
-                               match_count, match_count == 1 ? "" : "s",
+            (void)sbuf_appendf(eb->extra, "[ic-info]Actions found - case %s%s[/]\n",
                                session_case_sensitive ? "sensitive" : "insensitive", mouse_suffix);
         } else {
-            (void)sbuf_appendf(eb->extra, "[ic-info]Actions (%zd total) - case %s%s[/]\n",
-                               total_actions, session_case_sensitive ? "sensitive" : "insensitive",
-                               mouse_suffix);
+            (void)sbuf_appendf(eb->extra, "[ic-info]Actions - case %s%s[/]\n",
+                               session_case_sensitive ? "sensitive" : "insensitive", mouse_suffix);
         }
 
-        ssize_t term_width = term_get_width(env->term);
-        ssize_t available_lines = edit_menu_available_lines(env, eb, 4, 3);
+        const ssize_t content_width = edit_menu_content_width(env);
+        const ssize_t reserved_rows =
+            edit_menu_input_rows(env, eb) + edit_menu_rendered_rows(env, eb, sbuf_string(eb->extra)) +
+            (!env->no_help ? edit_menu_rendered_rows(env, eb, k_command_palette_footer) : 0) + 1;
+        ssize_t available_lines = edit_menu_available_lines(
+            env, eb, reserved_rows, 1, env->command_palette_max_line_count, menu_session.maximized);
         edit_menu_window_t window =
             edit_menu_window_for(env, match_count, available_lines, selected_idx, scroll_offset);
         ssize_t display_count = window.display_count;
@@ -444,6 +448,7 @@ again:;
         last_display_count = display_count;
         last_max_scroll = window.max_scroll;
 
+        const ssize_t items_start = sbuf_len(eb->extra);
         for (ssize_t i = 0; i < display_count; ++i) {
             ssize_t match_idx = scroll_offset + i;
             if (match_idx >= match_count) {
@@ -527,7 +532,7 @@ again:;
             const ssize_t tag_reserved_columns =
                 tagbuf[0] != '\0' ? (ssize_t)(strlen(tag_prefix) + strlen(tagbuf)) : 0;
             const edit_menu_preview_t preview =
-                edit_menu_preview(display, term_width - 4 - tag_reserved_columns);
+                edit_menu_preview(display, content_width - 2 - tag_reserved_columns);
 
             bool is_selected = (match_idx == selected_idx);
             if (is_selected) {
@@ -560,6 +565,7 @@ again:;
             (void)sbuf_append(eb->extra, "\n");
         }
 
+        edit_menu_append_scrollbar(env, eb, &menu_session.scrollbar, items_start, &window);
         edit_menu_append_scroll_hint(eb->extra, match_count, display_count, scroll_offset);
     } else {
         scroll_offset = 0;
@@ -568,15 +574,13 @@ again:;
     }
 
     if (!env->no_help) {
-        (void)sbuf_append(eb->extra,
-                          "[ic-diminish](↑↓/wheel:navigate shift+↑/↓:page enter/tab:run alt+c:case "
-                          "esc:cancel)[/]");
+        (void)sbuf_append(eb->extra, k_command_palette_footer);
     }
 
     edit_refresh(env, eb);
 
     code_t c;
-    if (!edit_menu_read_event(env, eb, &menu_session, &c)) {
+    if (!edit_menu_read_event(env, eb, &menu_session, &c, &scroll_offset, &selected_idx)) {
         goto again;
     }
     code_t key_no_mods = KEY_NO_MODS(c);

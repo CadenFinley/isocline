@@ -323,7 +323,7 @@ ic_status_hint_mode_t ic_get_status_hint_mode(void);
 ///   Native selection during the same drag depends on the terminal; some terminals require a
 ///   second drag after capture is released.
 /// - `IC_MOUSE_CLICKING_MENU_ONLY`: leave editing capture off and acquire it only while an
-///   expanded completion, history, or command-palette menu is open.
+///   completion, history, or command-palette menu is open.
 /// While a menu owns mouse capture, clicking outside its selectable items temporarily releases
 /// capture to the terminal. Keyboard input or a terminal focus-in event restores it.
 typedef enum ic_mouse_clicking_mode_e {
@@ -815,6 +815,28 @@ bool ic_enable_history_fuzzy_case_sensitive(bool enable);
 /// Report whether the fuzzy history search menu currently matches case-sensitively.
 bool ic_history_fuzzy_search_is_case_sensitive(void);
 
+/// Scope interactive history recall to the directory supplied by the host (default: false).
+/// Entries without cwd metadata are excluded while scoped. Returns the previous setting.
+bool ic_enable_history_directory(bool enable);
+bool ic_history_directory_is_enabled(void);
+
+/// Include descendants of the current directory when scoped (default: false).
+/// Returns the previous setting.
+bool ic_enable_history_directory_subdirs(bool enable);
+bool ic_history_directory_subdirs_is_enabled(void);
+
+/// Include all ancestors of the current directory, up to /, when scoped (default: false).
+/// Independent of descendant inclusion; siblings remain excluded. Returns the previous setting.
+bool ic_enable_history_directory_parents(bool enable);
+bool ic_history_directory_parents_is_enabled(void);
+
+/// Set the physical absolute directory used for history recall. The string is copied.
+/// NULL or empty means unknown; scoped recall then returns no stored entries.
+bool ic_set_history_directory(const char* directory);
+
+/// Test decoded cwd metadata against the active scope (for host-provided history completions).
+bool ic_history_matches_directory(const char* directory);
+
 /// History search menu sort arrangements.
 typedef enum ic_history_search_sort_e {
     /// Sort matches by the most recent time the command was run.
@@ -855,13 +877,28 @@ bool ic_enable_completion_preview(bool enable);
 /// Return the current setting without changing it.
 bool ic_completion_preview_is_enabled(void);
 
-/// Configure whether completion menus open in expanded mode by default (disabled by default).
-/// When enabled, the first completion menu view uses the full single-column layout without
-/// requiring PgDn/ctrl-j to expand.
+/// Show an unselected completion menu while editing (disabled by default).
+/// Tab completes a single match immediately; with multiple matches it activates the menu
+/// without accepting or extending the input.
+/// Down activates and selects the first entry only at the end of the entire input buffer.
+/// Other arrow-key input retains normal editing and history navigation.
+/// With prompt mouse capture enabled, scrolling also activates the first entry,
+/// and a click activates the clicked entry (or the first entry for a header/footer click).
+/// The activating navigation gesture or click never accepts a completion.
+/// After acceptance, suggestions refresh and remain passive until the next interaction.
+/// Empty lines, no matches, or whitespace immediately before the cursor hide the passive menu.
+/// Tab still opens completions after whitespace. Escape dismisses either passive or active menus
+/// and suppresses automatic reopening without clearing input. Pressing Tab completes or opens
+/// the menu manually and re-enables automatic suggestions. A new prompt also resets suppression.
+/// Inline hints can appear alongside the passive menu, honoring the hint and hint-delay settings.
+/// Right/End accepts an inline hint; Enter submits only the typed input while the menu is passive.
+/// The completion-preview setting controls the selected candidate after menu activation.
+/// Passive completion callbacks report ic_completion_is_hint() so they can defer expensive work.
 /// Returns the previous setting.
-bool ic_enable_completion_menu_start_expanded(bool enable);
-/// Return the current setting without changing it.
-bool ic_completion_menu_start_expanded_is_enabled(void);
+bool ic_enable_completion_auto_menu(bool enable);
+
+/// Is the automatic, passive completion menu enabled?
+bool ic_completion_auto_menu_is_enabled(void);
 
 /// Enable or disable click-to-accept for completion candidates (disabled by default).
 /// Returns the previous setting.
@@ -926,14 +963,22 @@ size_t ic_set_multiline_bottom_line_count(size_t line_count);
 /// Get the preferred number of content rows retained around the cursor or menu selection.
 size_t ic_get_multiline_bottom_line_count(void);
 
-/// Configure the maximum visible content rows in completion, history, command palette, and custom
-/// menus, including expanded item previews. The default is 50. Headers and help text use separate
-/// rows, and menus shrink to fit the terminal. Values are clamped to the range 1 through 256.
-/// Returns the previous configured line count.
-size_t ic_set_menu_max_line_count(size_t line_count);
+/// Configure independent menu content-row limits, including expanded item previews.
+/// All menus default to 15 rows. Values are clamped to 1 through 256. Headers and help text use
+/// separate rows, and menus shrink to fit the terminal. Ctrl+J temporarily toggles the
+/// open menu between its configured limit and all available terminal space, without
+/// changing these settings. The toggle resets when the menu closes.
+/// Each setter returns that menu's previous configured line count.
+size_t ic_set_completion_menu_max_line_count(size_t line_count);
+size_t ic_set_history_menu_max_line_count(size_t line_count);
+size_t ic_set_command_palette_max_line_count(size_t line_count);
+size_t ic_set_custom_menu_max_line_count(size_t line_count);
 
-/// Get the current maximum number of visible menu content rows.
-size_t ic_get_menu_max_line_count(void);
+/// Get each menu's configured maximum number of visible content rows.
+size_t ic_get_completion_menu_max_line_count(void);
+size_t ic_get_history_menu_max_line_count(void);
+size_t ic_get_command_palette_max_line_count(void);
+size_t ic_get_custom_menu_max_line_count(void);
 
 /// Enable or disable line numbers in multiline input mode. (enabled by default)
 /// When enabled, each line will be prefixed with a line number (e.g., "2| ", "3| ", etc.).
@@ -1253,8 +1298,8 @@ const char* ic_completion_input(ic_completion_env_t* cenv, long* cursor);
 /// Get the completion argument passed to `ic_set_completer`.
 void* ic_completion_arg(const ic_completion_env_t* cenv);
 
-/// Is this an automatic inline hint? Completers should avoid expensive work
-/// such as launching processes when this returns true.
+/// Is this an automatic suggestion (inline hint or passive completion menu)?
+/// Completers should avoid expensive work such as launching processes when this returns true.
 bool ic_completion_is_hint(const ic_completion_env_t* cenv);
 
 /// Do we have already some completions?

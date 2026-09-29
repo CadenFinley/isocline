@@ -30,6 +30,10 @@
 // Application-provided menu: this file is included in editline.c
 //-------------------------------------------------------------
 
+static const char* const k_custom_menu_footer =
+    "[ic-diminish](↑↓/wheel:navigate shift+↑/↓:page enter/tab:select "
+    "alt+c:case ctrl+j:resize esc:cancel)[/]";
+
 typedef struct custom_menu_match_s {
     ssize_t item_idx;
     int score;
@@ -121,7 +125,7 @@ static void custom_menu_render_item(ic_env_t* env, editor_t* eb, stringbuf_t* di
         (void)sbuf_append(eb->extra, "\n");
         return;
     }
-    const edit_menu_preview_t preview = edit_menu_preview(display, term_get_width(env->term) - 4);
+    const edit_menu_preview_t preview = edit_menu_preview(display, edit_menu_content_width(env) - 2);
 
     if (is_selected) {
         (void)sbuf_append(eb->extra, "[ic-menu-selected]");
@@ -238,17 +242,17 @@ again:;
     last_display_count = 0;
     last_max_scroll = 0;
     selected_preview_limit = 0;
+    menu_session.scrollbar.rows = 0;
     sbuf_clear(eb->extra);
     const char* mouse_suffix =
         (menu_session.mouse_scroll_enabled ? " | Mouse clicking is enabled" : "");
 
     if (match_count > 0) {
         if (is_filtered) {
-            (void)sbuf_appendf(eb->extra, "[ic-info]%zd item%s found - case %s%s[/]\n", match_count,
-                               match_count == 1 ? "" : "s",
+            (void)sbuf_appendf(eb->extra, "[ic-info]Items found - case %s%s[/]\n",
                                session_case_sensitive ? "sensitive" : "insensitive", mouse_suffix);
         } else {
-            (void)sbuf_appendf(eb->extra, "[ic-info]Items (%zd total) - case %s%s[/]\n", item_count,
+            (void)sbuf_appendf(eb->extra, "[ic-info]Items - case %s%s[/]\n",
                                session_case_sensitive ? "sensitive" : "insensitive", mouse_suffix);
         }
 
@@ -264,7 +268,11 @@ again:;
             }
         }
 
-        ssize_t available_lines = edit_menu_available_lines(env, eb, 4, 3);
+        const ssize_t reserved_rows =
+            edit_menu_input_rows(env, eb) + edit_menu_rendered_rows(env, eb, sbuf_string(eb->extra)) +
+            (!env->no_help ? edit_menu_rendered_rows(env, eb, k_custom_menu_footer) : 0) + 1;
+        ssize_t available_lines = edit_menu_available_lines(
+            env, eb, reserved_rows, 1, env->custom_menu_max_line_count, menu_session.maximized);
         if (selected_preview_limit > available_lines) {
             selected_preview_limit = available_lines;
         }
@@ -281,6 +289,7 @@ again:;
         last_max_scroll = window.max_scroll;
         scroll_offset = window.scroll_offset;
 
+        const ssize_t items_start = sbuf_len(eb->extra);
         for (ssize_t i = 0; i < last_display_count; ++i) {
             ssize_t match_idx = scroll_offset + i;
             if (match_idx >= match_count) {
@@ -293,6 +302,7 @@ again:;
             custom_menu_render_item(env, eb, display_buffer, &items[match->item_idx], match,
                                     is_filtered, match_idx == selected_idx, selected_preview_limit);
         }
+        edit_menu_append_scrollbar(env, eb, &menu_session.scrollbar, items_start, &window);
         edit_menu_append_scroll_hint(eb->extra, match_count, last_display_count, scroll_offset);
     } else {
         scroll_offset = 0;
@@ -301,15 +311,13 @@ again:;
     }
 
     if (!env->no_help) {
-        (void)sbuf_append(eb->extra,
-                          "[ic-diminish](↑↓/wheel:navigate shift+↑/↓:page enter/tab:select "
-                          "alt+c:case esc:cancel)[/]");
+        (void)sbuf_append(eb->extra, k_custom_menu_footer);
     }
     edit_refresh(env, eb);
 
     accepted_with_mouse = false;
     code_t c;
-    if (!edit_menu_read_event(env, eb, &menu_session, &c)) {
+    if (!edit_menu_read_event(env, eb, &menu_session, &c, &scroll_offset, &selected_idx)) {
         goto again;
     }
     code_t key_no_mods = KEY_NO_MODS(c);
