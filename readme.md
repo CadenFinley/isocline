@@ -4,7 +4,7 @@ Designed and maintained by Caden Finley (https://cadenfinley.com/) as part of CJ
 
 Isocline is a pure C line-editing and terminal-formatting library designed as a modern drop-in replacement for GNU readline. This fork keeps the upstream MIT license and zero-dependency ethos while expanding the feature surface for CJ's Shell (cjsh), language REPLs, and custom CLI hosts that want richer UX without pulling in external runtimes.
 
-The code lives in `cjsh-isocline/src/` and is distributed with `cjsh-isocline/src/isocline.h` so it can be vendored directly or built as a static library.
+Copy the root `isocline.h` into your project to use the entire library as one file. The maintained sources live in `cjsh-isocline/src/` and can also be built as a static library.
 
 ## What changed compared to upstream?
 
@@ -21,10 +21,13 @@ All of these additions are backward compatible: leave the new toggles untouched 
 
 ## Quick start
 
-Add the header to your compilation units and call `ic_readline`:
+Copy `isocline.h` from the repository root, define `ISOCLINE_IMPLEMENTATION` in exactly one C source file before any system headers, and call `ic_readline`:
 
 ```c
+#define ISOCLINE_IMPLEMENTATION
 #include "isocline.h"
+#include <stdlib.h>
+#include <string.h>
 
 static void configure_editor(void) {
   ic_enable_multiline(true);
@@ -43,7 +46,7 @@ int main(void) {
 
   char* line = NULL;
   while ((line = ic_readline("cjsh> ", NULL, NULL)) != NULL) {
-    if (strcmp(line, "exit") == 0) {
+    if (strcmp(line, "exit") == 0 || strcmp(line, IC_READLINE_TOKEN_CTRL_D) == 0) {
       free(line);
       break;
     }
@@ -55,15 +58,26 @@ int main(void) {
 }
 ```
 
-### Single translation unit build
+### Single-file library
 
-Compile the amalgamated source when vendoring:
+The root `isocline.h` contains the public API, key binding definitions, and all implementation code. It requires no other isocline files or separately built library. In other compilation units, include `isocline.h` without defining `ISOCLINE_IMPLEMENTATION`.
+
+Compile the example above as C11 or later. On POSIX systems, use `-pthread`:
 
 ```bash
-gcc -std=c11 -Icjsh-isocline/src -c cjsh-isocline/src/isocline.c
+cc -std=c11 -pthread example.c -o example
 ```
 
-Define `IC_SEPARATE_OBJS` to build translation units individually (recommended for faster incremental builds inside cjsh).
+For C++ applications, compile the implementation in a C source file and include the header normally from C++ callers.
+
+After editing the maintained sources, regenerate the single header:
+
+```bash
+python3 tools/amalgamate.py
+python3 tools/amalgamate.py --check
+```
+
+When Python is available, CMake also provides `cmake --build build --target isocline_amalgamate`. The generated header preserves the source license notices.
 
 ### CMake
 
@@ -77,7 +91,7 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-The build outputs `libisocline.a` (or `.lib` on Windows) plus `isocline_example` and `isocline_test_colors`. Set `-DBUILD_TESTING=OFF` if you only want the library.
+The build outputs `libisocline.a` (or `.lib` on Windows) plus `isocline_example`, `isocline_test_colors`, and the standalone-header test. CMake uses `IC_SEPARATE_OBJS` to compile the maintained sources individually; consumers of that library include the public header normally. Set `-DBUILD_TESTING=OFF` if you only want the library.
 
 ## Editor capabilities
 
