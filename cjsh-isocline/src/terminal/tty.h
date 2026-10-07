@@ -31,6 +31,8 @@
 #ifndef IC_TTY_H
 #define IC_TTY_H
 
+#include <stddef.h>
+#include <stdint.h>
 #include "common.h"
 #include "keycodes.h"
 
@@ -109,6 +111,10 @@ ic_private code_t tty_read_esc(tty_t* tty, long esc_initial_timeout,
 typedef bool(tty_response_fun_t)(const char* response, void* arg);
 ic_private bool tty_read_esc_response(tty_t* tty, char esc_start, bool final_st, char* buf,
                                       ssize_t buflen, tty_response_fun_t* matches, void* arg);
+ic_private bool tty_read_esc_response_with_timeout(tty_t* tty, char esc_start, bool final_st,
+                                                   char* buf, ssize_t buflen,
+                                                   tty_response_fun_t* matches, void* arg,
+                                                   long initial_timeout_ms);
 
 //-------------------------------------------------------------
 // Key codes: a code_t is 32 bits.
